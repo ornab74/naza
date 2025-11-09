@@ -1,0 +1,4 @@
+venv/
+models/
+.enc_key
+chat_history.db.aes
