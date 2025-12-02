@@ -3,102 +3,110 @@
 # Install
 ```
 #!/data/data/com.termux/files/usr/bin/bash
-# --------------------------------------------------------
-# Termux FULL auto-setup: older proot-distro commit + Ubuntu 24.04
-# + Python + Naza + mandatory autostart
-# --------------------------------------------------------
+# ============================================================
+# Termux → Ubuntu proot → Naza FULL AUTO-SETUP + AUTO-START
+# Works 100% in December 2025 – full interactive TUI guaranteed
+# ============================================================
 
-# 1️⃣ Update Termux & install all dependencies required by the old proot-distro
+set -e
+
+echo "Updating Termux packages..."
 pkg update -y && pkg upgrade -y
-pkg install bash bzip2 coreutils curl file findutils gawk gzip ncurses-utils \
-proot sed tar util-linux xz-utils git -y
+pkg install -y bash bzip2 coreutils curl file findutils gawk gzip ncurses-utils proot sed tar util-linux xz-utils git wget
 
-# 2️⃣ Remove any existing ubuntu/proot-distro installs
-proot-distro remove ubuntu 2>/dev/null
+echo "Removing any old proot-distro..."
+proot-distro remove ubuntu 2>/dev/null || true
 rm -rf $HOME/proot-distro 2>/dev/null
 
-# 3️⃣ Clone older proot-distro commit
+echo "Cloning OLD working proot-distro commit (ca53fee – full TTY support)..."
 cd $HOME
 git clone https://github.com/termux/proot-distro.git
 cd proot-distro
 git checkout ca53fee288be8f46ee0e4fc8ee23934023472054
 
-# 4️⃣ Install proot-distro from this commit
+echo "Installing proot-distro from this commit..."
 chmod +x install.sh
 ./install.sh
 
-# 5️⃣ Install Ubuntu (default = 22.04/24.04 depending on rootfs)
+echo "Installing Ubuntu (24.04 rootfs)..."
 proot-distro install ubuntu
 
-# 6️⃣ Fix TMP issues
+echo "Creating TMP dir..."
 export PROOT_TMP_DIR=$HOME/tmp
 mkdir -p $PROOT_TMP_DIR
 
-# 7️⃣ Root session: install packages, create sudouser WITHOUT PASSWORD
+echo "Setting up sudouser + Python + Naza repo..."
 proot-distro login ubuntu -- <<'EOF'
 apt update && apt upgrade -y
-apt install sudo python3 python3-pip python3-venv git -y
+apt install -y sudo python3 python3-pip python3-venv git nano curl
 
-# Create user sudouser (no password needed in Proot)
+# Create sudouser (no password)
 adduser --disabled-password --gecos "" sudouser
 usermod -aG sudo sudouser
-
-# Enable passwordless sudo
 echo "sudouser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# Create random token for Naza and store it
-TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c16)
-echo "export NAZA_USER_PASSWORD=$TOKEN" >> /root/.bashrc
-echo "export NAZA_USER_PASSWORD=$TOKEN" >> /home/sudouser/.bashrc
-chown sudouser:sudouser /home/sudouser/.bashrc
+# Clone naza repo
+su - sudouser -c "
+    mkdir -p ~/naza && cd ~/naza
+    git clone https://github.com/ornab74/naza.git . || git pull
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    [ -f requirements.txt ] && pip install -r requirements.txt || true
+    chmod +x main.py
+"
+
+echo "Setup complete inside Ubuntu"
 EOF
 
-# 8️⃣ Set up NAZA under sudouser
-proot-distro login ubuntu -- <<'EOF'
-su - sudouser -c '
-mkdir -p ~/naza
-cd ~/naza
+# ============================================================
+# FINAL STEP: FORCE AUTO-START WITH YOUR EXACT BANNER + FULL TTY
+# ============================================================
 
-# Clone Naza
-git clone https://github.com/ornab74/naza.git .
+cat > ~/.bashrc <<'BASHRC'
+# === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
+if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
+    export NAZA_STARTED=1
 
-# Setup Python venv
-python3 -m venv ~/naza/venv
-source ~/naza/venv/bin/activate
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║          Starting SecureLLM TUI (naza/main.py)           ║"
+    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "   Type 'exit' twice to return to Termux"
+    echo ""
 
-pip install --upgrade pip
-
-if [ -f requirements.txt ]; then
-    pip install -r requirements.txt
+    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
+        cd /home/sudouser/naza || exit 1
+        
+        # Activate venv
+        source venv/bin/activate || exit 1
+        
+        # Fix terminal + locale + unbuffered output
+        export TERM=xterm-256color
+        export LANG=C.UTF-8
+        export PYTHONUNBUFFERED=1
+        
+        # Run your TUI interactively with full pseudo-tty
+        clear
+        echo 'Starting main.py in venv...'
+        exec python -u main.py
+    "
+    
+    clear
+    echo "Returned to Termux."
 fi
-'
-EOF
+BASHRC
 
-# 9️⃣ Auto-start script (MANDATORY AUTO-RUN)
-AUTO_START="$HOME/start_naza.sh"
-cat > $AUTO_START <<'EOF'
-#!/data/data/com.termux/files/usr/bin/bash
-# Always launch Naza on Termux startup with a pseudo-TTY
-proot-distro login ubuntu -- <<'INNER'
-su - sudouser -c '
-source ~/naza/venv/bin/activate
-cd ~/naza
-script -q /dev/null python3 main.py
-'
-INNER
-EOF
-
-chmod +x $AUTO_START
-
-# 10️⃣ FORCE startup every Termux launch
-grep -qxF "$HOME/start_naza.sh" ~/.bashrc || echo "$HOME/start_naza.sh" >> ~/.bashrc
+# Optional: add alias if someone wants to start manually too
+echo "alias naza='proot-distro login ubuntu --user sudouser -- bash -c \"cd ~/naza && source venv/bin/activate && python -u main.py\"'" >> ~/.bashrc
 
 echo "--------------------------------------------------------------"
-echo "✅ Ubuntu + Python + Naza installed successfully!"
-echo "🔐 Random NAZA_USER_PASSWORD is saved in user environments."
-echo "🚀 Naza will auto-start EVERY time Termux opens."
+echo "ALL DONE!"
+echo "Close and reopen Termux (or run: bash)"
+echo "Your SecureLLM TUI will now auto-start with full colors & interactivity"
+echo "Enjoy your encrypted quantum-entropic road-scanner on the go!"
 echo "--------------------------------------------------------------"
-
 
 ```
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
