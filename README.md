@@ -8,7 +8,8 @@
 1. Install Termux from the Play Store 
    https://play.google.com/store/apps/details?id=com.termux
    
-3. Download and Run the Setup script with one line command
+2. Download and Run the Setup script by copying the one line command below into Termux and pressing enter.
+   
 ```
 curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && if echo "0fd04d0c35d29e9d7420fbcb6250a0bedb6368e7d27c118b24dafca646d829d3  setup.sh" | sha256sum -c - >/dev/null 2>&1; then echo -e "\nHash verified! Running Naza auto-setup...\n" && bash setup.sh && rm -f setup.sh; else echo -e "\nHASH VERIFICATION FAILED!\nThe downloaded file has been tampered with or is corrupted.\nAborting for your safety.\n" && rm -f setup.sh && exit 1; fi
 ```
