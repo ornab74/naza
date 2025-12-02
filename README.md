@@ -3,24 +3,24 @@
 
 
 
-# Android Installation Instructions
+## Android Installation Instructions
 
-## 1. Install Termux
-## 2. Download and Run the Setup script with one line command
+1. Install Termux
+2. Download and Run the Setup script with one line command
 ```
 curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && if echo "0fd04d0c35d29e9d7420fbcb6250a0bedb6368e7d27c118b24dafca646d829d3  setup.sh" | sha256sum -c - >/dev/null 2>&1; then echo -e "\nHash verified! Running Naza auto-setup...\n" && bash setup.sh && rm -f setup.sh; else echo -e "\nHASH VERIFICATION FAILED!\nThe downloaded file has been tampered with or is corrupted.\nAborting for your safety.\n" && rm -f setup.sh && exit 1; fi
 ```
+3. After install completes. Type exit then enter twice or force quit termux
+4. Open termux
+5. After naza boots up, press 1.
+6. Press enter for each prompt to DL, encrypt, delete plaintext LLM GGUF
+7. Press option 6
+8. Press option 3 , Enter your route location and press enter with blank boxes for the rest
+9. Press enter for default chunked +, punkd generation
+10. View your risk score low/medium/high
+11. If high pause trip , change up your route on google maps, check weather and vehicle for issues, then rerun. 
 
-## 3. After install completes. Type exit then enter twice or force quit termux
-## 4. Open termux
-## 5. After naza boots up, press 1.
-## 6. Press enter for each prompt to DL, encrypt, delete plaintext LLM GGUF
-## 7. Press 6
-## 8. Press 3 , Enter your route location and press enter with blank boxes for the rest
-## 9. Press enter for default chunked +, punkd generation
-# 10. View your risk score low/medium/high
-# 11. If high pause trip , change up your route on google maps, check weather and vehicle for issues, then rerun. 
-
+## About
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
 
 This system also logs encrypted chat history and allows modular extension for other intelligence tasks, e.g., food & water supply analysis (main_foodwater.py).
