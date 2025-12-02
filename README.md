@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/
     
 10. View your risk score low/medium/high
     
-11. If youn scan shows high, consider the risk and think about pausing your trip. Or cange up your route on google maps, check the weather and your vehicle for issues. Then rerun after 5 or 10 minutes
+11. If the scan shows high... consider the risks and think about pausing your trip. Or cange up your route on google maps, check the weather and your vehicle for issues. Then rerun after 5 or 10 minutes
 
 ## About
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
