@@ -1,114 +1,26 @@
 
 # Naza — Quantum-Enhanced Road Scanner & Secure LLM CLI
-# Install
+
+
+
+# Android Installation Instructions
+
+## 1. Install Termux
+## 2. Download and Run the Setup script with one line command
 ```
-#!/data/data/com.termux/files/usr/bin/bash
-# ============================================================
-# Termux → Ubuntu proot → Naza FULL AUTO-SETUP + AUTO-START
-# Works 100% in December 2025 – full interactive TUI guaranteed
-# ============================================================
-
-set -e
-
-echo "Updating Termux packages..."
-pkg update -y && pkg upgrade -y
-pkg install -y bash bzip2 coreutils curl file findutils gawk gzip ncurses-utils proot sed tar util-linux xz-utils git wget
-
-echo "Removing any old proot-distro..."
-proot-distro remove ubuntu 2>/dev/null || true
-rm -rf $HOME/proot-distro 2>/dev/null
-
-echo "Cloning OLD working proot-distro commit (ca53fee – full TTY support)..."
-cd $HOME
-git clone https://github.com/termux/proot-distro.git
-cd proot-distro
-git checkout ca53fee288be8f46ee0e4fc8ee23934023472054
-
-echo "Installing proot-distro from this commit..."
-chmod +x install.sh
-./install.sh
-
-echo "Installing Ubuntu (24.04 rootfs)..."
-proot-distro install ubuntu
-
-echo "Creating TMP dir..."
-export PROOT_TMP_DIR=$HOME/tmp
-mkdir -p $PROOT_TMP_DIR
-
-echo "Setting up sudouser + Python + Naza repo..."
-proot-distro login ubuntu -- <<'EOF'
-apt update && apt upgrade -y
-apt install -y sudo python3 python3-pip python3-venv git nano curl
-
-# Create sudouser (no password)
-adduser --disabled-password --gecos "" sudouser
-usermod -aG sudo sudouser
-echo "sudouser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-# Clone naza repo
-su - sudouser -c "
-    mkdir -p ~/naza && cd ~/naza
-    git clone https://github.com/ornab74/naza.git . || git pull
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install --upgrade pip
-    [ -f requirements.txt ] && pip install -r requirements.txt || true
-    chmod +x main.py
-"
-
-echo "Setup complete inside Ubuntu"
-EOF
-
-# ============================================================
-# FINAL STEP: FORCE AUTO-START WITH YOUR EXACT BANNER + FULL TTY
-# ============================================================
-
-cat > ~/.bashrc <<'BASHRC'
-# === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
-if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
-    export NAZA_STARTED=1
-
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║          Starting SecureLLM TUI (naza/main.py)           ║"
-    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo "   Type 'exit' twice to return to Termux"
-    echo ""
-
-    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
-        cd /home/sudouser/naza || exit 1
-        
-        # Activate venv
-        source venv/bin/activate || exit 1
-        
-        # Fix terminal + locale + unbuffered output
-        export TERM=xterm-256color
-        export LANG=C.UTF-8
-        export PYTHONUNBUFFERED=1
-        
-        # Run your TUI interactively with full pseudo-tty
-        clear
-        echo 'Starting main.py in venv...'
-        exec python -u main.py
-    "
-    
-    clear
-    echo "Returned to Termux."
-fi
-BASHRC
-
-# Optional: add alias if someone wants to start manually too
-echo "alias naza='proot-distro login ubuntu --user sudouser -- bash -c \"cd ~/naza && source venv/bin/activate && python -u main.py\"'" >> ~/.bashrc
-
-echo "--------------------------------------------------------------"
-echo "ALL DONE!"
-echo "Close and reopen Termux (or run: bash)"
-echo "Your SecureLLM TUI will now auto-start with full colors & interactivity"
-echo "Enjoy your encrypted quantum-entropic road-scanner on the go!"
-echo "--------------------------------------------------------------"
-
+curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && if echo "0fd04d0c35d29e9d7420fbcb6250a0bedb6368e7d27c118b24dafca646d829d3  setup.sh" | sha256sum -c - >/dev/null 2>&1; then echo -e "\nHash verified! Running Naza auto-setup...\n" && bash setup.sh && rm -f setup.sh; else echo -e "\nHASH VERIFICATION FAILED!\nThe downloaded file has been tampered with or is corrupted.\nAborting for your safety.\n" && rm -f setup.sh && exit 1; fi
 ```
+
+## 3. After install completes. Type exit then enter twice or force quit termux
+## 4. Open termux
+## 5. After naza boots up, press 1.
+## 6. Press enter for each prompt to DL, encrypt, delete plaintext LLM GGUF
+## 7. Press 6
+## 8. Press 3 , Enter your route location and press enter with blank boxes for the rest
+## 9. Press enter for default chunked +, punkd generation
+# 10. View your risk score low/medium/high
+# 11. If high pause trip , change up your route on google maps, check weather and vehicle for issues, then rerun. 
+
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
 
 This system also logs encrypted chat history and allows modular extension for other intelligence tasks, e.g., food & water supply analysis (main_foodwater.py).
