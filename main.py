@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -55,16 +54,19 @@ def boxed(title: str, lines: List[str], width: int = 72):
 def getch():
     try:
         import tty, termios
-    except Exception:
-        return sys.stdin.read(1).encode()
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = os.read(fd, 3)
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = os.read(fd, 3)
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except (ImportError, AttributeError, OSError):
+        
+        s = input()
+        return s[0].encode() if s else b''
+
 
 def read_menu_choice(num_items:int, prompt="Use ↑↓ arrows or number, Enter to select: ")->int:
     print(prompt)
@@ -247,7 +249,7 @@ import sys
 import time
 from typing import Dict
 
-# try to import psutil but don't crash here
+
 try:
     import psutil
 except Exception:
@@ -255,15 +257,14 @@ except Exception:
 
 
 def _read_proc_stat():
-    """Return tuple(total, idle) from /proc/stat cpu line, or None on error."""
+    
     try:
         with open("/proc/stat", "r") as f:
             line = f.readline()
         if not line.startswith("cpu "):
             return None
         parts = line.split()
-        # user nice system idle iowait irq softirq steal guest guest_nice
-        # we sum all fields as total and use idle = idle + iowait
+        
         vals = [int(x) for x in parts[1:]]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         total = sum(vals)
@@ -273,7 +274,7 @@ def _read_proc_stat():
 
 
 def _cpu_percent_from_proc(sample_interval=0.12):
-    """Estimate CPU percent (0.0 - 1.0) using /proc/stat sampling."""
+    
     t1 = _read_proc_stat()
     if not t1:
         return None
@@ -288,12 +289,12 @@ def _cpu_percent_from_proc(sample_interval=0.12):
     if total_delta <= 0:
         return None
     usage = (total_delta - idle_delta) / float(total_delta)
-    # clamp
+    
     return max(0.0, min(1.0, usage))
 
 
 def _mem_from_proc():
-    """Return mem fraction used (0.0 - 1.0) using /proc/meminfo, or None."""
+    
     try:
         info = {}
         with open("/proc/meminfo", "r") as f:
@@ -303,14 +304,14 @@ def _mem_from_proc():
                     continue
                 k = parts[0].strip()
                 v = parts[1].strip().split()[0]
-                info[k] = int(v)  # kB
-        # Prefer MemAvailable if present
+                info[k] = int(v) 
+        
         total = info.get("MemTotal")
         available = info.get("MemAvailable", None)
         if total is None:
             return None
         if available is None:
-            # fallback: estimate available = free + buffers + cached
+            
             available = info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0)
         used_fraction = max(0.0, min(1.0, (total - available) / float(total)))
         return used_fraction
@@ -319,12 +320,12 @@ def _mem_from_proc():
 
 
 def _load1_from_proc(cpu_count_fallback=1):
-    """Return normalized 1-min load average (0.0 - 1.0) dividing by cpu_count."""
+
     try:
         with open("/proc/loadavg", "r") as f:
             first = f.readline().split()[0]
         load1 = float(first)
-        # cpu_count
+        
         try:
             cpu_cnt = os.cpu_count() or cpu_count_fallback
         except Exception:
@@ -336,17 +337,17 @@ def _load1_from_proc(cpu_count_fallback=1):
 
 
 def _proc_count_from_proc():
-    """Count numeric entries in /proc as number of processes (normalized)."""
+    
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit()]
-        # choose a sensible normalization; previously used /1000
+        
         return max(0.0, min(1.0, len(pids) / 1000.0))
     except Exception:
         return None
 
 
 def _read_temperature():
-    """Try to read thermal sensors from /sys/class/thermal. Return normalized 0-1 or None."""
+    
     temps = []
     try:
         base = "/sys/class/thermal"
@@ -360,16 +361,16 @@ def _read_temperature():
                         raw = f.read().strip()
                     if not raw:
                         continue
-                    # temp is often in millidegrees Celsius
+                    
                     val = int(raw)
-                    if val > 1000:  # millideg -> convert
+                    if val > 1000: 
                         c = val / 1000.0
                     else:
                         c = float(val)
                     temps.append(c)
                 except Exception:
                     continue
-        # if nothing from thermal, try common CPU temp paths (Termux/Android unlikely)
+    
         if not temps:
             possible = [
                 "/sys/devices/virtual/thermal/thermal_zone0/temp",
@@ -388,7 +389,7 @@ def _read_temperature():
                     continue
         if not temps:
             return None
-        # use median-ish (average) and normalize: assume 20..90 C -> 0..1
+        
         avg_c = sum(temps) / len(temps)
         norm = (avg_c - 20.0) / (90.0 - 20.0)
         return max(0.0, min(1.0, norm))
@@ -397,16 +398,11 @@ def _read_temperature():
 
 
 def collect_system_metrics() -> Dict[str, float]:
-    """
-    Collect system metrics. Tries psutil first; if it fails, uses /proc and /sys fallbacks.
-    If both methods fail to produce the core metrics (cpu, mem, load1, proc) the
-    function prints a fatal error and exits the process (won't continue).
-    Returns a dict with keys: cpu, mem, load1, temp, proc (all floats 0.0-1.0).
-    """
-    # initialize to None to detect failures
+    
+    
     cpu = mem = load1 = temp = proc = None
 
-    # 1) Try psutil if available
+    
     if psutil is not None:
         try:
             cpu = psutil.cpu_percent(interval=0.1) / 100.0
@@ -420,7 +416,7 @@ def collect_system_metrics() -> Dict[str, float]:
             try:
                 temps_map = psutil.sensors_temperatures()
                 if temps_map:
-                    # pick first available reading
+                    
                     first = next(iter(temps_map.values()))[0].current
                     temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
                 else:
@@ -432,10 +428,10 @@ def collect_system_metrics() -> Dict[str, float]:
             except Exception:
                 proc = None
         except Exception:
-            # psutil initialization or calls failed; fall back below
+            
             cpu = mem = load1 = temp = proc = None
 
-    # 2) If any core metric missing, use /proc fallback(s)
+    
     if cpu is None:
         cpu = _cpu_percent_from_proc()
     if mem is None:
@@ -445,17 +441,17 @@ def collect_system_metrics() -> Dict[str, float]:
     if proc is None:
         proc = _proc_count_from_proc()
     if temp is None:
-        temp = _read_temperature()  # temp optional; can be None
+        temp = _read_temperature()  
 
-    # 3) Decide whether fallbacks succeeded for core metrics
+    
     core_ok = all(x is not None for x in (cpu, mem, load1, proc))
     if not core_ok:
-        # fail loudly and stop the program (as requested)
+        
         missing = [name for name, val in (("cpu", cpu), ("mem", mem), ("load1", load1), ("proc", proc)) if val is None]
         print(f"[FATAL] Unable to obtain core system metrics: missing {missing}")
         sys.exit(2)
 
-    # clamp and ensure floats
+    
     cpu = float(max(0.0, min(1.0, cpu)))
     mem = float(max(0.0, min(1.0, mem)))
     load1 = float(max(0.0, min(1.0, load1)))
