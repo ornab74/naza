@@ -3,7 +3,7 @@
 
 
 
-## Android Installation and Usage
+## Android OS Installation and Usage
 
 1. Install Termux
    
