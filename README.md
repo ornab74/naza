@@ -1,7 +1,7 @@
 
 # Naza — Quantum-Enhanced Road Scanner & Secure LLM CLI
 
-
+![Naza SecureLLM TUI – Quantum-Entropic Road Scanner in Action](https://raw.githubusercontent.com/ornab74/naza/refs/heads/main/demonaza.png)
 
 ## Android OS Installation and Usage
 
