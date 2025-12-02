@@ -14,11 +14,11 @@
 curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && if echo "0fd04d0c35d29e9d7420fbcb6250a0bedb6368e7d27c118b24dafca646d829d3  setup.sh" | sha256sum -c - >/dev/null 2>&1; then echo -e "\nHash verified! Running Naza auto-setup...\n" && bash setup.sh && rm -f setup.sh; else echo -e "\nHASH VERIFICATION FAILED!\nThe downloaded file has been tampered with or is corrupted.\nAborting for your safety.\n" && rm -f setup.sh && exit 1; fi
 ```
 
-3. After install completes. Type exit then enter twice or force quit termux
+3. After the installation completes. Type exit then enter twice or force quit termux
    
-4. Open termux
+4. Open Termux
 
-5. After naza boots up, press 1.
+5. After Naza boots up, press 1.
    
 6. Press enter for each prompt to DL, encrypt, delete plaintext LLM GGUF
     
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/
     
 10. View your risk score low/medium/high
     
-11. If high pause trip , change up your route on google maps, check weather and vehicle for issues, then rerun. 
+11. If youn scan shows high, consider the risk and think about pausing your trip. Or cange up your route on google maps, check the weather and your vehicle for issues. Then rerun after 5 or 10 minutes
 
 ## About
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
