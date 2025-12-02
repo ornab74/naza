@@ -1,6 +1,102 @@
 
 # Naza — Quantum-Enhanced Road Scanner & Secure LLM CLI
+# Install
+```
+#!/data/data/com.termux/files/usr/bin/bash
+# --------------------------------------------------------
+# Termux setup: older proot-distro commit + Ubuntu 24.04 + Python + Naza
+# Auto-start main.py mandatory
+# --------------------------------------------------------
 
+# 1️⃣ Update Termux and install all required dependencies
+pkg update -y && pkg upgrade -y
+pkg install bash bzip2 coreutils curl file findutils gawk gzip ncurses-utils \
+proot sed tar util-linux xz-utils git -y
+
+# 2️⃣ Remove old proot-distro or Ubuntu installations
+proot-distro remove ubuntu 2>/dev/null
+rm -rf $HOME/proot-distro 2>/dev/null
+
+# 3️⃣ Clone the older proot-distro commit
+cd $HOME
+git clone https://github.com/termux/proot-distro.git
+cd proot-distro
+git checkout ca53fee288be8f46ee0e4fc8ee23934023472054
+
+# 4️⃣ Install proot-distro from source
+chmod +x install.sh
+./install.sh
+
+# 5️⃣ Install Ubuntu (default in this commit)
+proot-distro install ubuntu
+
+# 6️⃣ Create temporary folder to prevent hang issues
+export PROOT_TMP_DIR=$HOME/tmp
+mkdir -p $PROOT_TMP_DIR
+
+# 7️⃣ Login as root and install packages, create sudo user with random password
+proot-distro login ubuntu -- <<'EOF'
+apt update && apt upgrade -y
+apt install sudo python3 python3-venv python3-pip git -y
+
+# Generate random password for sudouser
+PASSWORD=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c16)
+echo "sudouser:$PASSWORD" | chpasswd
+
+# Store password in environment variable
+echo "export NAZA_USER_PASSWORD=$PASSWORD" >> /root/.bashrc
+
+# Create sudo user and allow passwordless sudo
+adduser --gecos "" sudouser
+echo "sudouser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+usermod -aG sudo sudouser
+EOF
+
+# 8️⃣ Login as root and set up Naza as sudouser
+proot-distro login ubuntu -- <<'EOF'
+su - sudouser -c '
+mkdir -p ~/naza
+cd ~/naza
+
+# Clone Naza repository
+git clone https://github.com/ornab74/naza.git .
+
+# Create Python virtual environment
+python3 -m venv ~/naza/venv
+source ~/naza/venv/bin/activate
+
+# Upgrade pip and install requirements
+pip install --upgrade pip
+if [ -f requirements.txt ]; then
+    pip install -r requirements.txt
+fi
+'
+EOF
+
+# 9️⃣ Mandatory auto-start script
+AUTO_START="$HOME/start_naza.sh"
+cat > $AUTO_START <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+# Auto-start Naza with pseudo-TTY
+proot-distro login ubuntu -- <<'INNER'
+su - sudouser -c '
+source ~/naza/venv/bin/activate
+cd ~/naza
+script -q /dev/null python3 main.py
+'
+INNER
+EOF
+
+chmod +x $AUTO_START
+
+# 10️⃣ Force auto-start when Termux launches
+grep -qxF "$HOME/start_naza.sh" ~/.bashrc || echo "$HOME/start_naza.sh" >> ~/.bashrc
+
+echo "✅ Ubuntu 24.04 + Python + Naza setup complete!"
+echo "Random password for sudouser stored in NAZA_USER_PASSWORD environment variable."
+echo "Naza will auto-start every time Termux launches."
+
+```
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
 
 This system also logs encrypted chat history and allows modular extension for other intelligence tasks, e.g., food & water supply analysis (main_foodwater.py).
