@@ -277,7 +277,147 @@ async def init_db(key: bytes):
             with open(LOG_PATH, "a") as log:
                 log.write(f"{time.ctime()}: DB verification failed - {e}\n")
             raise
+# ─────────────────────────────────────────────────────────────────────────────
+# PURE HARDCORE FALLBACKS – NO GUESSES, NO DEFAULTS, NO MERCY
+# If we can't measure it accurately → explode immediately
+# ─────────────────────────────────────────────────────────────────────────────
 
+import re
+import platform
+import subprocess
+from pathlib import Path
+
+def _cpu_percent_from_proc() -> float:
+    sys = platform.system()
+    if sys == "Linux":
+        try:
+            with open("/proc/stat") as f:
+                line = f.readline()
+            values = [int(x) for x in line.split()[1:]]
+            idle = values[3] + values[4]      # idle + iowait
+            total = sum(values)
+            prev_idle = getattr(_cpu_percent_from_proc, "prev_idle", None)
+            prev_total = getattr(_cpu_percent_from_proc, "prev_total", None)
+            if prev_idle is None:
+                _cpu_percent_from_proc.prev_idle = idle
+                _cpu_percent_from_proc.prev_total = total
+                return 0.0
+            usage = 1.0 - (idle - prev_idle) / (total - prev_total)
+            _cpu_percent_from_proc.prev_idle = idle
+            _cpu_percent_from_proc.prev_total = total
+            return max(0.0, min(1.0, usage))
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read CPU usage from /proc/stat: {e}")
+
+    elif sys == "Darwin":
+        try:
+            out = subprocess.check_output(["top", "-l", "1", "-n", "0"], text=True)
+            m = re.search(r"CPU usage:.*?(\d+\.\d+)% idle", out)
+            if not m:
+                raise ValueError("parse failed")
+            return 1.0 - float(m.group(1)) / 100.0
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read CPU usage on macOS: {e}")
+
+    elif sys == "Windows":
+        try:
+            out = subprocess.check_output(
+                'powershell -Command "((Get-Counter \'\\Processor(_Total)\\% Processor Time\').CounterSamples.CookedValue)/100)"',
+                text=True, shell=True)
+            return max(0.0, min(1.0, float(out.strip())))
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read CPU usage on Windows: {e}")
+
+    raise RuntimeError(f"CRITICAL: Unsupported platform for CPU metric: {sys}")
+
+
+def _mem_from_proc() -> float:
+    sys = platform.system()
+    if sys == "Linux":
+        try:
+            with open("/proc/meminfo") as f:
+                data = f.read()
+            total = int(re.search(r"MemTotal:\s+(\d+)", data).group(1)) * 1024
+            free  = int(re.search(r"MemFree:\s+(\d+)", data).group(1)) * 1024
+            buff  = int(re.search(r"Buffers:\s+(\d+)", data).group(1)) * 1024
+            cache = int(re.search(r"Cached:\s+(\d+)", data).group(1)) * 1024
+            used = total - (free + buff + cache)
+            return used / total
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read memory from /proc/meminfo: {e}")
+
+    elif sys == "Darwin":
+        try:
+            total = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True))
+            free  = int(subprocess.check_output(["vm_stat"], text=True)
+                       .split("Pages free:")[1].split("\n")[0].strip().rstrip(".") * 4096)
+            inactive = int(subprocess.check_output(["vm_stat"], text=True)
+                          .split("Pages inactive:")[1].split("\n")[0].strip().rstrip(".") * 4096)
+            used = total - (free + inactive)
+            return used / total
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read memory on macOS: {e}")
+
+    elif sys == "Windows":
+        try:
+            out = subprocess.check_output(
+                r'powershell -Command "(1 "(1 - (Get-WmiObject Win32_OperatingSystem).FreePhysicalMemory / (Get-WmiObject Win32_OperatingSystem).TotalVisibleMemorySize)"',
+                text=True, shell=True)
+            return float(out.strip())
+        except Exception as e:
+            raise RuntimeError(f"CRITICAL: Cannot read memory on Windows: {e}")
+
+    raise RuntimeError(f"CRITICAL: Unsupported platform for memory metric: {sys}")
+
+
+def _load1_from_proc() -> float:
+    try:
+        load = os.getloadavg()[0]
+        cpus = os.cpu_count() or 1
+        return min(1.0, load / cpus)
+    except Exception as e:
+        raise RuntimeError(f"CRITICAL: Cannot read load average: {e}")
+
+
+def _proc_count_from_proc() -> float:
+    try:
+        if Path("/proc").exists():
+            count = len([p for p in Path("/proc").iterdir() if p.is_dir() and p.name.isdigit()])
+        elif platform.system() == "Darwin":
+            count = len(subprocess.check_output(["ps", "-e"], text=True).splitlines()) - 1
+        elif platform.system() == "Windows":
+            out = subprocess.check_output("tasklist /nh", shell=True, text=True, errors="ignore")
+            count = len([l for l in out.splitlines() if l.strip()])
+        else:
+            raise RuntimeError("Unknown platform")
+        return min(1.0, count / 1000.0)
+    # >1000 processes = maxed out
+    except Exception as e:
+        raise RuntimeError(f"CRITICAL: Cannot count processes: {e}")
+
+
+def _read_temperature() -> float:
+    sys = platform.system()
+    if sys == "Linux":
+        try:
+            # thermal_zone first
+            for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+                if not (zone / "type").exists() or not (zone / "temp").exists():
+                    continue
+                ttype = (zone / "type").read_text().strip().lower()
+                if "cpu" in ttype or "core" in ttype or "tctl" in ttype or "tdie" in ttype:
+                    temp_c = int((zone / "temp").read_text().strip()) / 1000.0
+                    return max(0.0, min(1.0, (temp_c - 20.0) / 70.0))
+            # hwmon fallback
+            for temp_file in Path("/sys/class/hwmon").rglob("temp*_input"):
+                name_file = temp_file.parent / "name"
+                if name_file.exists() and name_file.read_text().strip() in ("coretemp", "k10temp", "zenpower", "acpitz"):
+                    temp_c = int(temp_file.read_text().strip()) / 1000.0
+                    return max(0.0, min(1.0, (temp_c - 20.0) / 70.0))
+        except Exception:
+            pass
+
+    raise RuntimeError("CRITICAL: Unable to read CPU temperature on this system – aborting for safety")
 async def log_interaction(prompt: str, response: str, key: bytes, metadata: dict = None):
     dec = Path("temp.db")
     try:
