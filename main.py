@@ -466,33 +466,49 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
-def pennylane_entropic_score(rgb: Tuple[float,float,float], shots: int = 256) -> float:
+def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
+    
     if qml is None or pnp is None:
-        r,g,b = rgb
-        seed = int((r*255)<<16 | (g*255)<<8 | (b*255))
+        r, g, b = rgb
+
+    
+        ri = max(0, min(255, int(r * 255)))
+        gi = max(0, min(255, int(g * 255)))
+        bi = max(0, min(255, int(b * 255)))
+
+        
+        seed = (ri << 16) | (gi << 8) | bi
         random.seed(seed)
-        base = (0.3*r + 0.4*g + 0.3*b)
-        noise = (random.random()-0.5)*0.08
+
+        base = (0.3 * r + 0.4 * g + 0.3 * b)
+        noise = (random.random() - 0.5) * 0.08
         return max(0.0, min(1.0, base + noise))
+
+    
     dev = qml.device("default.qubit", wires=2, shots=shots)
+
     @qml.qnode(dev)
-    def circuit(a,b,c):
+    def circuit(a, b, c):
         qml.RX(a * math.pi, wires=0)
         qml.RY(b * math.pi, wires=1)
-        qml.CNOT(wires=[0,1])
+        qml.CNOT(wires=[0, 1])
         qml.RZ(c * math.pi, wires=1)
         qml.RX((a + b) * math.pi / 2, wires=0)
         qml.RY((b + c) * math.pi / 2, wires=1)
         return qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))
-    a,b,c = float(rgb[0]), float(rgb[1]), float(rgb[2])
-    try:
-        ev0,ev1 = circuit(a,b,c)
-        combined = ((ev0+1.0)/2.0 * 0.6 + (ev1+1.0)/2.0 * 0.4)
-        score = 1.0 / (1.0 + math.exp(-6.0*(combined - 0.5)))
-        return float(max(0.0,min(1.0,score)))
-    except Exception:
-        return float(0.5 * (a+b+c) / 3.0)
 
+    a, b, c = float(rgb[0]), float(rgb[1]), float(rgb[2])
+
+    try:
+        ev0, ev1 = circuit(a, b, c)
+        combined = ((ev0 + 1.0) / 2.0 * 0.6 +
+                    (ev1 + 1.0) / 2.0 * 0.4)
+        score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
+        return float(max(0.0, min(1.0, score)))
+    except Exception:
+        
+        return float(0.5 * (a + b + c) / 3.0)
+        
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
 
