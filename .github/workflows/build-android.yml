@@ -86,7 +86,7 @@ jobs:
             -G Ninja
 
           cmake --build /tmp/liboqs-src/build --parallel
-          cmake --install /tmp/liboqs-src/build
+          sudo cmake --install /tmp/liboqs-src/build
           sudo ldconfig
 
           rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
