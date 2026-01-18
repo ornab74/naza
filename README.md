@@ -41,6 +41,30 @@ fi
     
 11. If the scan shows high... consider the risks and think about pausing your trip. Or cange up your route on google maps, check the weather and your vehicle for issues. Then rerun after 5 or 10 minutes
 
+## Android Build (GitHub Actions)
+
+This repo ships a Buildozer spec and a GitHub Actions workflow that builds:
+
+- **Debug APK** (artifact: `Naza-Android-APK`)
+- **Release AAB** (artifact: `Naza-Android-AAB`, only on non-PR runs with signing secrets)
+
+Workflow: `.github/workflows/build-android.yml`  
+Build config: `buildozer.spec`
+
+To run a build:
+
+1. Push to `main` or trigger **Actions → Build Android (Debug / Release)**.
+2. Download the artifacts from the workflow run.
+
+Signing secrets (optional for AAB):
+
+- `ANDROID_KEYSTORE_B64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+PQ lock verification runs before builds using `scripts/pq_verify_lock.py`.
+
 ## About
 Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
 
