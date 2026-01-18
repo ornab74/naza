@@ -1,4 +1,4 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
@@ -117,13 +117,20 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def _write_key_file(key_bytes: bytes) -> None:
+    KEY_PATH.write_bytes(key_bytes)
+    try:
+        os.chmod(KEY_PATH, 0o600)
+    except Exception:
+        pass
+
 def get_or_create_key() -> bytes:
     if KEY_PATH.exists():
         d = KEY_PATH.read_bytes()
         if len(d) >= 48: return d[16:48]
         return d[:32]
     key = AESGCM.generate_key(256)
-    KEY_PATH.write_bytes(key)
+    _write_key_file(key)
     print(f"🔑 New random key generated and saved to {KEY_PATH}")
     return key
 
@@ -149,12 +156,12 @@ def ensure_key_interactive() -> bytes:
             print("Passphrases mismatch. Aborting.")
             sys.exit(1)
         salt, key = derive_key_from_passphrase(pw)
-        KEY_PATH.write_bytes(salt + key)
+        _write_key_file(salt + key)
         print(f"Saved salt+derived key to {KEY_PATH}")
         return key
     else:
         key = AESGCM.generate_key(256)
-        KEY_PATH.write_bytes(key)
+        _write_key_file(key)
         print(f"Saved random key to {KEY_PATH}")
         return key
 
@@ -203,51 +210,67 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     dest.write_bytes(data)
     print(f"✅ Decrypted ({len(data)} bytes)")
 
+def _temp_db_path() -> Path:
+    tmp = tempfile.NamedTemporaryFile(prefix="naza_", suffix=".db", delete=False)
+    tmp.close()
+    return Path(tmp.name)
+
 async def init_db(key: bytes):
     if not DB_PATH.exists():
-        async with aiosqlite.connect("temp.db") as db:
-            await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
-            await db.commit()
-        with open("temp.db","rb") as f:
-            enc = aes_encrypt(f.read(), key)
-        DB_PATH.write_bytes(enc)
-        os.remove("temp.db")
+        tmp_db = _temp_db_path()
+        try:
+            async with aiosqlite.connect(tmp_db) as db:
+                await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+                await db.commit()
+            with tmp_db.open("rb") as f:
+                enc = aes_encrypt(f.read(), key)
+            DB_PATH.write_bytes(enc)
+        finally:
+            try:
+                tmp_db.unlink()
+            except Exception:
+                pass
 
 async def log_interaction(prompt: str, response: str, key: bytes):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
-    async with aiosqlite.connect(dec) as db:
-        await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
-        await db.commit()
-    with dec.open("rb") as f:
-        enc = aes_encrypt(f.read(), key)
-    DB_PATH.write_bytes(enc)
-    dec.unlink()
+    dec = _temp_db_path()
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+            await db.commit()
+        with dec.open("rb") as f:
+            enc = aes_encrypt(f.read(), key)
+        DB_PATH.write_bytes(enc)
+    finally:
+        try:
+            dec.unlink()
+        except Exception:
+            pass
 
 async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[str]=None):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
     rows=[]
-    async with aiosqlite.connect(dec) as db:
-        if search:
-            q = f"%{search}%"
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-        else:
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-    with dec.open("rb") as f:
-        DB_PATH.write_bytes(aes_encrypt(f.read(), key))
-    dec.unlink()
+    dec = _temp_db_path()
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            if search:
+                q = f"%{search}%"
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+            else:
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+        with dec.open("rb") as f:
+            DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+    finally:
+        try:
+            dec.unlink()
+        except Exception:
+            pass
     return rows
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
-
-import os
-import sys
-import time
-from typing import Dict
 
 
 try:
@@ -589,7 +612,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
         rgb = metrics_to_rgb(metrics)
         score = pennylane_entropic_score(rgb)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc_count",0.0))
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc",0.0))
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
@@ -827,7 +850,7 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = Path("temp.db")
+    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = _temp_db_path()
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -838,11 +861,11 @@ def rekey_flow(state:dict):
     except Exception as e:
         print(f"Unexpected: {e}"); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
     if choice=="1":
-        new_key = AESGCM.generate_key(256); KEY_PATH.write_bytes(new_key); print("New random key generated and saved.")
+        new_key = AESGCM.generate_key(256); _write_key_file(new_key); print("New random key generated and saved.")
     else:
         pw = getpass.getpass("Enter new passphrase: "); pw2 = getpass.getpass("Confirm: ")
         if pw!=pw2: print("Mismatch."); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
-        salt, derived = derive_key_from_passphrase(pw); KEY_PATH.write_bytes(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
+        salt, derived = derive_key_from_passphrase(pw); _write_key_file(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
     try:
         if tmp_model.exists():
             old_h = sha256_file(tmp_model)
@@ -897,4 +920,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
