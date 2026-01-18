@@ -36,6 +36,7 @@ include_patterns =
 android.permissions = INTERNET
 
 # (int) Target Android API, minimum API, and NDK API to use
+android.sdk_path = /usr/local/lib/android/sdk
 android.api = 35
 android.minapi = 23
 android.ndk_api = 23
