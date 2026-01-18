@@ -32,6 +32,7 @@ def main() -> int:
     sig_bytes = read_required(SIG_PATH)
     pubkey_b64 = read_required(PUBKEY_PATH)
 
+    manifest_bytes = manifest_bytes.rstrip(b"\n")
     req_text = req_bytes.decode("utf-8", errors="replace").splitlines()
     req_alg = parse_header_value(req_text, "# pq_signature_alg=")
     if not req_alg:
