@@ -19,7 +19,8 @@ version = 0.1.0
 android.version_code = 1
 
 # (list) Application requirements
-requirements = python3,kivy==2.2.1,httpx,cryptography,aiosqlite,psutil,pennylane,llama-cpp-python
+# NOTE: llama-cpp-python does not build reliably for Android/Buildozer.
+requirements = python3,kivy==2.2.1,httpx,cryptography,aiosqlite,psutil,pennylane
 
 # (list) Application orientation
 orientation = portrait
