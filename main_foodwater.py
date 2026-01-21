@@ -1,4 +1,4 @@
-u#!/usr/bin/env python3
+8u#!/usr/bin/env python3
 import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -470,32 +470,67 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
-def pennylane_entropic_score(rgb: Tuple[float,float,float], shots: int = 256) -> float:
+def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
+    """
+    Compute an entropic score from RGB-like system metrics.
+    Uses PennyLane quantum simulation if available, otherwise
+    falls back to a deterministic classical approximation.
+    Returns a float in range [0.0, 1.0].
+    """
+
+    # --- Fallback path (no PennyLane) ---
     if qml is None or pnp is None:
-        r,g,b = rgb
-        seed = int((r*255)<<16 | (g*255)<<8 | (b*255))
+        r, g, b = rgb
+
+        # Convert normalized floats -> 8-bit ints safely
+        ri = int(r * 255) & 0xFF
+        gi = int(g * 255) & 0xFF
+        bi = int(b * 255) & 0xFF
+
+        # Deterministic 24-bit RGB seed
+        seed = (ri << 16) | (gi << 8) | bi
         random.seed(seed)
-        base = (0.3*r + 0.4*g + 0.3*b)
-        noise = (random.random()-0.5)*0.08
+
+        # Weighted base entropy estimate
+        base = (0.3 * r + 0.4 * g + 0.3 * b)
+
+        # Small deterministic noise
+        noise = (random.random() - 0.5) * 0.08
+
         return max(0.0, min(1.0, base + noise))
+
+    # --- Quantum path (PennyLane available) ---
     dev = qml.device("default.qubit", wires=2, shots=shots)
+
     @qml.qnode(dev)
-    def circuit(a,b,c):
+    def circuit(a, b, c):
         qml.RX(a * math.pi, wires=0)
         qml.RY(b * math.pi, wires=1)
-        qml.CNOT(wires=[0,1])
+        qml.CNOT(wires=[0, 1])
         qml.RZ(c * math.pi, wires=1)
         qml.RX((a + b) * math.pi / 2, wires=0)
         qml.RY((b + c) * math.pi / 2, wires=1)
-        return qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))
-    a,b,c = float(rgb[0]), float(rgb[1]), float(rgb[2])
+        return (
+            qml.expval(qml.PauliZ(0)),
+            qml.expval(qml.PauliZ(1)),
+        )
+
+    a, b, c = float(rgb[0]), float(rgb[1]), float(rgb[2])
+
     try:
-        ev0,ev1 = circuit(a,b,c)
-        combined = ((ev0+1.0)/2.0 * 0.6 + (ev1+1.0)/2.0 * 0.4)
-        score = 1.0 / (1.0 + math.exp(-6.0*(combined - 0.5)))
-        return float(max(0.0,min(1.0,score)))
+        ev0, ev1 = circuit(a, b, c)
+
+        # Normalize expectation values from [-1,1] -> [0,1]
+        combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
+
+        # Logistic squashing for stability
+        score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
+
+        return float(max(0.0, min(1.0, score)))
+
     except Exception:
-        return float(0.5 * (a+b+c) / 3.0)
+        # Quantum failure fallback (safe + monotonic)
+        return float(max(0.0, min(1.0, (a + b + c) / 3.0)))
 
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
