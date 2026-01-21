@@ -11,8 +11,8 @@
 2. Download and Run the Setup script by copying the one line command below into Termux and pressing enter.
    
 ```
-curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && \
-if echo "a7f59cf265c82b5b74b522adad5d1ce2d6d72e73d48b630fff3f0356743e4611  setup.sh" | sha256sum -c - >/dev/null 2>&1; then
+curl -fsSL https://raw.githubusercontent.com/ornab74/naza/main/termux-naza-autosetup/setup.sh -o setup.sh && \
+if echo "422c2471b038c0c99551d6203a76997c60190ce0572158f17c2ae3187fb0b0a5  setup.sh" | sha256sum -c - >/dev/null 2>&1; then
   echo -e "\nHash verified! Running Naza auto-setup...\n"
   bash setup.sh
   rm -f setup.sh
