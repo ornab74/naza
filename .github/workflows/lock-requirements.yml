@@ -5,12 +5,13 @@ on:
   push:
     paths:
       - requirements.in
+      - main.py
+      - main_foodwater.py
       - .github/workflows/lock-and-pq-sign-lockfile.yml
 
 jobs:
   lock_and_pq_sign:
     runs-on: ubuntu-latest
-
     container:
       image: python:3.12-slim
 
@@ -33,13 +34,11 @@ jobs:
 
       - name: Upgrade pip + install pip-tools
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pip-tools
 
       - name: Generate hash-locked requirements.txt
         run: |
-          set -euo pipefail
           pip-compile \
             --generate-hashes \
             --resolver=backtracking \
@@ -48,7 +47,6 @@ jobs:
 
       - name: Build + install liboqs
         run: |
-          set -euo pipefail
           LIBOQS_VERSION="0.14.0"
           LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
 
@@ -66,24 +64,19 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DBUILD_SHARED_LIBS=ON \
             -DOQS_USE_OPENSSL=OFF \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -G Ninja
 
           cmake --build /tmp/liboqs-src/build --parallel
           cmake --install /tmp/liboqs-src/build
           ldconfig
 
-          rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
-
-      - name: Install liboqs-python (oqs module)
+      - name: Install liboqs-python
         run: |
-          set -euo pipefail
           pip install "liboqs-python==0.14.1"
           python -c "import oqs; print('oqs ready')"
 
-      - name: Prepend provenance header into requirements.txt (BEFORE hashing/signing)
+      - name: Prepend provenance header
         run: |
-          set -euo pipefail
           {
             echo "# liboqs_version=${LIBOQS_VERSION}"
             echo "# liboqs_tarball_sha256=${LIBOQS_SHA256}"
@@ -92,79 +85,66 @@ jobs:
             echo "# pq_manifest=lock.manifest.json"
             echo "# pq_signature=lock.manifest.pqsig"
             echo "# pq_pubkey=pq_pubkey.b64"
-            echo "# generated_by=github_actions_lock_and_pq_sign_lockfile"
+            echo "# generated_by=github_actions"
             echo
             cat requirements.txt
           } > requirements.tmp
           mv requirements.tmp requirements.txt
 
-      - name: Create canonical lock manifest + PQ-sign it (Dilithium2)
+      - name: Create canonical manifest + PQ-sign (deps + entrypoints)
         run: |
-          set -euo pipefail
-
-          # IMPORTANT: heredoc terminator must be seen by bash reliably.
           cat > /tmp/pq_sign_lock.py <<'PY'
           import base64, hashlib, json, os, re, sys
           import oqs
 
           ALG = "Dilithium2"
-          REQ_PATH = "requirements.txt"
+          REQ = "requirements.txt"
+          ENTRIES = ["main.py", "main_foodwater.py"]
 
-          if not os.path.exists(REQ_PATH):
-              print("missing requirements.txt", file=sys.stderr)
-              sys.exit(2)
+          def sha256(path):
+              return hashlib.sha256(open(path,"rb").read()).hexdigest()
 
-          raw = open(REQ_PATH, "rb").read()
-          req_sha256 = hashlib.sha256(raw).hexdigest()
+          req_sha = sha256(REQ)
 
-          text = raw.decode("utf-8", errors="replace").splitlines()
-          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
+          entry_hashes = {}
+          for e in ENTRIES:
+              if not os.path.exists(e):
+                  print(f"missing entrypoint {e}", file=sys.stderr)
+                  sys.exit(2)
+              entry_hashes[e] = "sha256:" + sha256(e)
+
           pinned = []
-          for line in text:
+          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
+          for line in open(REQ, encoding="utf-8"):
               m = pkg_re.match(line.strip())
               if m:
                   pinned.append({"name": m.group(1).lower(), "version": m.group(2)})
           pinned.sort(key=lambda x: x["name"])
 
-          manifest_obj = {
+          manifest = {
               "format": "pq-lock-manifest-v1",
               "pq_alg": ALG,
-              "requirements_txt_sha256": req_sha256,
+              "requirements_txt_sha256": req_sha,
+              "entrypoints": entry_hashes,
               "pinned": pinned,
           }
 
-          canonical = json.dumps(manifest_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+          canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
 
           with oqs.Signature(ALG) as s:
               pub = s.generate_keypair()
               sig = s.sign(canonical)
 
-          open("lock.manifest.json", "wb").write(canonical + b"\n")
-          open("lock.manifest.pqsig", "wb").write(sig)
-          open("pq_pubkey.b64", "w", encoding="utf-8").write(base64.b64encode(pub).decode("ascii") + "\n")
+          open("lock.manifest.json","wb").write(canonical + b"\n")
+          open("lock.manifest.pqsig","wb").write(sig)
+          open("pq_pubkey.b64","w").write(base64.b64encode(pub).decode()+"\n")
 
-          pub2 = base64.b64decode(open("pq_pubkey.b64", "r", encoding="utf-8").read().strip())
+          # self-check
           with oqs.Signature(ALG) as v:
-              ok = v.verify(canonical, sig, pub2)
-          if not ok:
-              print("PQ verify failed (self-check)", file=sys.stderr)
-              sys.exit(3)
+              if not v.verify(canonical, sig, pub):
+                  sys.exit("PQ self-verify failed")
 
-          print("OK: manifest PQ-signed and verified.")
+          print("OK: deps + entrypoints PQ-signed")
           PY
 
           python /tmp/pq_sign_lock.py
-
-          echo "Produced files:"
-          ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
-
-      - name: Upload lock + PQ materials
-        uses: actions/upload-artifact@v4
-        with:
-          name: pq-locked-requirements
-          path: |
-            requirements.txt
-            lock.manifest.json
-            lock.manifest.pqsig
-            pq_pubkey.b64
-          retention-days: 30
