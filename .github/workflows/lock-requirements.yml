@@ -12,6 +12,7 @@ on:
 jobs:
   lock_and_pq_sign:
     runs-on: ubuntu-latest
+
     container:
       image: python:3.12-slim
 
@@ -34,11 +35,13 @@ jobs:
 
       - name: Upgrade pip + install pip-tools
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install pip-tools
 
       - name: Generate hash-locked requirements.txt
         run: |
+          set -euo pipefail
           pip-compile \
             --generate-hashes \
             --resolver=backtracking \
@@ -47,6 +50,7 @@ jobs:
 
       - name: Build + install liboqs
         run: |
+          set -euo pipefail
           LIBOQS_VERSION="0.14.0"
           LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
 
@@ -64,19 +68,24 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DBUILD_SHARED_LIBS=ON \
             -DOQS_USE_OPENSSL=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -G Ninja
 
           cmake --build /tmp/liboqs-src/build --parallel
           cmake --install /tmp/liboqs-src/build
           ldconfig
 
+          rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
+
       - name: Install liboqs-python
         run: |
+          set -euo pipefail
           pip install "liboqs-python==0.14.1"
           python -c "import oqs; print('oqs ready')"
 
       - name: Prepend provenance header
         run: |
+          set -euo pipefail
           {
             echo "# liboqs_version=${LIBOQS_VERSION}"
             echo "# liboqs_tarball_sha256=${LIBOQS_SHA256}"
@@ -93,6 +102,8 @@ jobs:
 
       - name: Create canonical manifest + PQ-sign (deps + entrypoints)
         run: |
+          set -euo pipefail
+
           cat > /tmp/pq_sign_lock.py <<'PY'
           import base64, hashlib, json, os, re, sys
           import oqs
@@ -103,6 +114,10 @@ jobs:
 
           def sha256(path):
               return hashlib.sha256(open(path,"rb").read()).hexdigest()
+
+          if not os.path.exists(REQ):
+              print("missing requirements.txt", file=sys.stderr)
+              sys.exit(2)
 
           req_sha = sha256(REQ)
 
@@ -139,12 +154,35 @@ jobs:
           open("lock.manifest.pqsig","wb").write(sig)
           open("pq_pubkey.b64","w").write(base64.b64encode(pub).decode()+"\n")
 
-          # self-check
           with oqs.Signature(ALG) as v:
               if not v.verify(canonical, sig, pub):
-                  sys.exit("PQ self-verify failed")
+                  print("PQ self-verify failed", file=sys.stderr)
+                  sys.exit(3)
 
           print("OK: deps + entrypoints PQ-signed")
           PY
 
           python /tmp/pq_sign_lock.py
+
+      - name: List produced files (debug)
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "Workspace:"
+          ls -la
+          echo
+          echo "Expected outputs:"
+          ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64 || true
+
+      - name: Upload PQ-locked materials (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pq-locked-naza-bundle
+          path: |
+            requirements.txt
+            lock.manifest.json
+            lock.manifest.pqsig
+            pq_pubkey.b64
+          if-no-files-found: error
+          retention-days: 30
