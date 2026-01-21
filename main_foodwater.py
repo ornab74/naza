@@ -272,7 +272,7 @@ def _read_proc_stat():
 
 
 def _cpu_percent_from_proc(sample_interval=0.12):
-    """Estimate CPU percent (0.0 - 1.0) using /proc/stat sampling."""
+    
     t1 = _read_proc_stat()
     if not t1:
         return None
@@ -292,7 +292,7 @@ def _cpu_percent_from_proc(sample_interval=0.12):
 
 
 def _mem_from_proc():
-    """Return mem fraction used (0.0 - 1.0) using /proc/meminfo, or None."""
+    
     try:
         info = {}
         with open("/proc/meminfo", "r") as f:
@@ -303,7 +303,7 @@ def _mem_from_proc():
                 k = parts[0].strip()
                 v = parts[1].strip().split()[0]
                 info[k] = int(v)  # kB
-        # Prefer MemAvailable if present
+        
         total = info.get("MemTotal")
         available = info.get("MemAvailable", None)
         if total is None:
@@ -318,7 +318,7 @@ def _mem_from_proc():
 
 
 def _load1_from_proc(cpu_count_fallback=1):
-    """Return normalized 1-min load average (0.0 - 1.0) dividing by cpu_count."""
+    
     try:
         with open("/proc/loadavg", "r") as f:
             first = f.readline().split()[0]
@@ -335,7 +335,7 @@ def _load1_from_proc(cpu_count_fallback=1):
 
 
 def _proc_count_from_proc():
-    """Count numeric entries in /proc as number of processes (normalized)."""
+    
     try:
         pids = [name for name in os.listdir("/proc") if name.isdigit()]
         # choose a sensible normalization; previously used /1000
@@ -345,7 +345,7 @@ def _proc_count_from_proc():
 
 
 def _read_temperature():
-    """Try to read thermal sensors from /sys/class/thermal. Return normalized 0-1 or None."""
+    
     temps = []
     try:
         base = "/sys/class/thermal"
@@ -359,16 +359,16 @@ def _read_temperature():
                         raw = f.read().strip()
                     if not raw:
                         continue
-                    # temp is often in millidegrees Celsius
+                    
                     val = int(raw)
-                    if val > 1000:  # millideg -> convert
+                    if val > 1000:
                         c = val / 1000.0
                     else:
                         c = float(val)
                     temps.append(c)
                 except Exception:
                     continue
-        # if nothing from thermal, try common CPU temp paths (Termux/Android unlikely)
+        
         if not temps:
             possible = [
                 "/sys/devices/virtual/thermal/thermal_zone0/temp",
@@ -387,7 +387,7 @@ def _read_temperature():
                     continue
         if not temps:
             return None
-        # use median-ish (average) and normalize: assume 20..90 C -> 0..1
+        
         avg_c = sum(temps) / len(temps)
         norm = (avg_c - 20.0) / (90.0 - 20.0)
         return max(0.0, min(1.0, norm))
@@ -396,16 +396,11 @@ def _read_temperature():
 
 
 def collect_system_metrics() -> Dict[str, float]:
-    """
-    Collect system metrics. Tries psutil first; if it fails, uses /proc and /sys fallbacks.
-    If both methods fail to produce the core metrics (cpu, mem, load1, proc) the
-    function prints a fatal error and exits the process (won't continue).
-    Returns a dict with keys: cpu, mem, load1, temp, proc (all floats 0.0-1.0).
-    """
-    # initialize to None to detect failures
+    
+    
     cpu = mem = load1 = temp = proc = None
 
-    # 1) Try psutil if available
+    
     if psutil is not None:
         try:
             cpu = psutil.cpu_percent(interval=0.1) / 100.0
@@ -419,7 +414,7 @@ def collect_system_metrics() -> Dict[str, float]:
             try:
                 temps_map = psutil.sensors_temperatures()
                 if temps_map:
-                    # pick first available reading
+                    
                     first = next(iter(temps_map.values()))[0].current
                     temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
                 else:
@@ -431,10 +426,10 @@ def collect_system_metrics() -> Dict[str, float]:
             except Exception:
                 proc = None
         except Exception:
-            # psutil initialization or calls failed; fall back below
+            
             cpu = mem = load1 = temp = proc = None
 
-    # 2) If any core metric missing, use /proc fallback(s)
+    
     if cpu is None:
         cpu = _cpu_percent_from_proc()
     if mem is None:
@@ -446,15 +441,15 @@ def collect_system_metrics() -> Dict[str, float]:
     if temp is None:
         temp = _read_temperature()  # temp optional; can be None
 
-    # 3) Decide whether fallbacks succeeded for core metrics
+    
     core_ok = all(x is not None for x in (cpu, mem, load1, proc))
     if not core_ok:
-        # fail loudly and stop the program (as requested)
+        
         missing = [name for name, val in (("cpu", cpu), ("mem", mem), ("load1", load1), ("proc", proc)) if val is None]
         print(f"[FATAL] Unable to obtain core system metrics: missing {missing}")
         sys.exit(2)
 
-    # clamp and ensure floats
+    
     cpu = float(max(0.0, min(1.0, cpu)))
     mem = float(max(0.0, min(1.0, mem)))
     load1 = float(max(0.0, min(1.0, load1)))
@@ -470,35 +465,30 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
 def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
-    """
-    Compute an entropic score from RGB-like system metrics.
-    Uses PennyLane quantum simulation if available, otherwise
-    falls back to a deterministic classical approximation.
-    Returns a float in range [0.0, 1.0].
-    """
+    
 
-    # --- Fallback path (no PennyLane) ---
+    
     if qml is None or pnp is None:
         r, g, b = rgb
 
-        # Convert normalized floats -> 8-bit ints safely
+        
         ri = int(r * 255) & 0xFF
         gi = int(g * 255) & 0xFF
         bi = int(b * 255) & 0xFF
 
-        # Deterministic 24-bit RGB seed
+        
         seed = (ri << 16) | (gi << 8) | bi
         random.seed(seed)
 
-        # Weighted base entropy estimate
+        
         base = (0.3 * r + 0.4 * g + 0.3 * b)
 
-        # Small deterministic noise
+        
         noise = (random.random() - 0.5) * 0.08
 
         return max(0.0, min(1.0, base + noise))
 
-    # --- Quantum path (PennyLane available) ---
+    
     dev = qml.device("default.qubit", wires=2, shots=shots)
 
     @qml.qnode(dev)
@@ -519,16 +509,16 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
     try:
         ev0, ev1 = circuit(a, b, c)
 
-        # Normalize expectation values from [-1,1] -> [0,1]
+        
         combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
 
-        # Logistic squashing for stability
+        
         score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
 
         return float(max(0.0, min(1.0, score)))
 
     except Exception:
-        # Quantum failure fallback (safe + monotonic)
+        
         return float(max(0.0, min(1.0, (a + b + c) / 3.0)))
 
 def entropic_to_modifier(score: float) -> float:
