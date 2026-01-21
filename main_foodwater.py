@@ -1,4 +1,3 @@
-8u#!/usr/bin/env python3
 import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
