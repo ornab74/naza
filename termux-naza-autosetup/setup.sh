@@ -1,249 +1,306 @@
-name: Lock requirements + PQ-sign lock manifest (no wheelhouse)
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+# Termux → Ubuntu proot → Naza FULL AUTO-SETUP + AUTO-START
+# + PQ LOCK VERIFICATION (Dilithium2) BEFORE INSTALLING DEPS
+# ============================================================
 
-on:
-  workflow_dispatch:
-  push:
-    paths:
-      - requirements.in
-      - main.py
-      - main_foodwater.py
-      - .github/workflows/lock-and-pq-sign-lockfile.yml
+set -euo pipefail
 
-jobs:
-  lock_and_pq_sign:
-    runs-on: ubuntu-latest
+echo "Updating Termux packages..."
+pkg update -y && pkg upgrade -y
+pkg install -y bash bzip2 coreutils curl file findutils gawk gzip ncurses-utils proot sed tar util-linux xz-utils git wget
 
-    container:
-      image: python:3.12-slim
+echo "Removing any old proot-distro..."
+proot-distro remove ubuntu 2>/dev/null || true
+rm -rf "$HOME/proot-distro" 2>/dev/null || true
 
-    defaults:
-      run:
-        shell: bash
+echo "Cloning OLD working proot-distro commit (ca53fee – full TTY support)..."
+cd "$HOME"
+git clone https://github.com/termux/proot-distro.git
+cd "$HOME/proot-distro"
+git checkout ca53fee288be8f46ee0e4fc8ee23934023472054
 
-    steps:
-      # ------------------------------------------------------------
-      # CHECKOUT
-      # ------------------------------------------------------------
-      - name: Checkout repo
-        uses: actions/checkout@v4
+echo "Installing proot-distro from this commit..."
+chmod +x install.sh
+./install.sh
 
-      # ------------------------------------------------------------
-      # SYSTEM TOOLS
-      # ------------------------------------------------------------
-      - name: Install system tools
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            coreutils \
-            cmake \
-            ninja-build \
-            build-essential \
-            pkg-config \
-            git
-          rm -rf /var/lib/apt/lists/*
+echo "Installing Ubuntu (24.04 rootfs)..."
+proot-distro install ubuntu
 
-      # ------------------------------------------------------------
-      # PYTHON TOOLING
-      # ------------------------------------------------------------
-      - name: Upgrade pip + install pip-tools
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pip-tools
+echo "Creating TMP dir..."
+export PROOT_TMP_DIR="$HOME/tmp"
+mkdir -p "$PROOT_TMP_DIR"
 
-      # ------------------------------------------------------------
-      # LOCK DEPENDENCIES (HASH-LOCKED)
-      # ------------------------------------------------------------
-      - name: Generate hash-locked requirements.txt
-        run: |
-          set -euo pipefail
-          pip-compile \
-            --generate-hashes \
-            --resolver=backtracking \
-            --output-file requirements.txt \
-            requirements.in
+echo "Setting up sudouser + Python + Naza repo + PQ verification..."
+proot-distro login ubuntu -- <<'EOF'
+set -euo pipefail
 
-      # ------------------------------------------------------------
-      # BUILD + INSTALL LIBOQS (FROM SOURCE)
-      # ------------------------------------------------------------
-      - name: Build + install liboqs
-        run: |
-          set -euo pipefail
+apt update && apt upgrade -y
 
-          LIBOQS_VERSION="0.14.0"
-          LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
+# Base tools + build tools (needed to build liboqs verifier)
+apt install -y \
+  sudo python3 python3-pip python3-venv git nano curl ca-certificates \
+  build-essential cmake ninja-build pkg-config libssl-dev
 
-          curl -fsSL -o /tmp/liboqs.tar.gz "${LIBOQS_URL}"
-          LIBOQS_SHA256="$(sha256sum /tmp/liboqs.tar.gz | awk '{print $1}')"
+# Create sudouser (no password)
+adduser --disabled-password --gecos "" sudouser
+usermod -aG sudo sudouser
+echo "sudouser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-          echo "LIBOQS_VERSION=${LIBOQS_VERSION}" >> "$GITHUB_ENV"
-          echo "LIBOQS_URL=${LIBOQS_URL}" >> "$GITHUB_ENV"
-          echo "LIBOQS_SHA256=${LIBOQS_SHA256}" >> "$GITHUB_ENV"
+# --- PQ verification + install as sudouser ---
+su - sudouser -c '
+set -euo pipefail
 
-          mkdir -p /tmp/liboqs-src
-          tar -xzf /tmp/liboqs.tar.gz -C /tmp/liboqs-src --strip-components=1
+mkdir -p ~/naza
+cd ~/naza
 
-          cmake -S /tmp/liboqs-src -B /tmp/liboqs-src/build \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DBUILD_SHARED_LIBS=ON \
-            -DOQS_USE_OPENSSL=OFF \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -G Ninja
+# Clone / update repo
+if [ -d .git ]; then
+  git pull --ff-only
+else
+  git clone https://github.com/ornab74/naza.git ./
+fi
 
-          cmake --build /tmp/liboqs-src/build --parallel
-          cmake --install /tmp/liboqs-src/build
-          ldconfig
+# Require PQ lock bundle to be present in repo root:
+#   requirements.txt
+#   lock.manifest.json
+#   lock.manifest.pqsig
+#   pq_pubkey.b64
+for f in requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64; do
+  if [ ! -f "$f" ]; then
+    echo "ERROR: Missing $f in ~/naza"
+    echo "Refusing to install dependencies without PQ lock verification."
+    exit 1
+  fi
+done
 
-          rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
+# ---- PQ VERIFY SCRIPT (build liboqs + verify Dilithium2 signature) ----
+cat > pq_verify_lock.sh <<'"'"'SH'"'"'
+#!/usr/bin/env bash
+set -euo pipefail
 
-      # ------------------------------------------------------------
-      # PYTHON OQS BINDINGS
-      # ------------------------------------------------------------
-      - name: Install liboqs-python
-        run: |
-          set -euo pipefail
-          pip install "liboqs-python==0.14.1"
-          python - <<'PY'
-          import oqs
-          print("oqs OK:", oqs.get_enabled_sig_mechanisms())
-          PY
+REQ="requirements.txt"
+MAN="lock.manifest.json"
+SIG="lock.manifest.pqsig"
+PUB_B64="pq_pubkey.b64"
 
-      # ------------------------------------------------------------
-      # PROVENANCE HEADER (BEFORE HASHING & SIGNING)
-      # ------------------------------------------------------------
-      - name: Prepend provenance header
-        run: |
-          set -euo pipefail
-          {
-            echo "# liboqs_version=${LIBOQS_VERSION}"
-            echo "# liboqs_tarball_sha256=${LIBOQS_SHA256}"
-            echo "# liboqs_tarball_url=${LIBOQS_URL}"
-            echo "# pq_signature_alg=Dilithium2"
-            echo "# pq_manifest=lock.manifest.json"
-            echo "# pq_signature=lock.manifest.pqsig"
-            echo "# pq_pubkey=pq_pubkey.b64"
-            echo "# generated_by=github_actions_lock_and_pq_sign"
-            echo
-            cat requirements.txt
-          } > requirements.tmp
-          mv requirements.tmp requirements.txt
+# Pull liboqs metadata + expected algorithm from requirements.txt header
+OQS_VER="$(grep -E "^# liboqs_version=" "$REQ" | head -n1 | cut -d= -f2-)"
+OQS_SHA="$(grep -E "^# liboqs_tarball_sha256=" "$REQ" | head -n1 | cut -d= -f2-)"
+OQS_URL="$(grep -E "^# liboqs_tarball_url=" "$REQ" | head -n1 | cut -d= -f2-)"
+REQ_PQ_ALG="$(grep -E "^# pq_signature_alg=" "$REQ" | head -n1 | cut -d= -f2-)"
 
-      # ------------------------------------------------------------
-      # CANONICAL MANIFEST + PQ SIGN (DEPS + ENTRYPOINTS)
-      # ------------------------------------------------------------
-      - name: Create canonical manifest + PQ-sign (deps + entrypoints)
-        run: |
-          set -euo pipefail
+if [ -z "${OQS_VER:-}" ] || [ -z "${OQS_SHA:-}" ] || [ -z "${OQS_URL:-}" ] || [ -z "${REQ_PQ_ALG:-}" ]; then
+  echo "ERROR: Missing PQ/liboqs header metadata in $REQ"
+  exit 1
+fi
 
-          cat > /tmp/pq_sign_lock.py <<'PY'
-          import base64
-          import hashlib
-          import json
-          import os
-          import re
-          import sys
-          import oqs
+# Parse manifest: pq_alg + requirements_txt_sha256
+read -r MAN_PQ_ALG MAN_REQ_SHA < <(python3 - <<PY
+import json
+with open("$MAN","rb") as f:
+    d=json.load(f)
+print(d.get("pq_alg",""), d.get("requirements_txt_sha256",""))
+PY
+)
 
-          ALG = "Dilithium2"
-          REQ = "requirements.txt"
-          ENTRIES = ["main.py", "main_foodwater.py"]
+if [ -z "${MAN_PQ_ALG:-}" ] || [ -z "${MAN_REQ_SHA:-}" ]; then
+  echo "ERROR: Manifest missing pq_alg and/or requirements_txt_sha256"
+  exit 1
+fi
 
-          def sha256(path):
-              with open(path, "rb") as f:
-                  return hashlib.sha256(f.read()).hexdigest()
+if [ "$REQ_PQ_ALG" != "$MAN_PQ_ALG" ]; then
+  echo "ERROR: Algorithm mismatch: requirements=$REQ_PQ_ALG manifest=$MAN_PQ_ALG"
+  exit 1
+fi
 
-          # --------------------------------------------------------
-          # REQUIREMENTS HASH
-          # --------------------------------------------------------
-          if not os.path.exists(REQ):
-              sys.exit("missing requirements.txt")
+# Verify requirements.txt sha256 matches manifest
+CALC_REQ_SHA="$(sha256sum "$REQ" | awk "{print \$1}")"
+if [ "$CALC_REQ_SHA" != "$MAN_REQ_SHA" ]; then
+  echo "ERROR: requirements.txt SHA256 mismatch!"
+  echo "  manifest: $MAN_REQ_SHA"
+  echo "  actual:   $CALC_REQ_SHA"
+  exit 1
+fi
 
-          req_sha = sha256(REQ)
+# Prepare workdir
+WD=".pqverify"
+mkdir -p "$WD"
+cd "$WD"
 
-          # --------------------------------------------------------
-          # ENTRYPOINT HASHES
-          # --------------------------------------------------------
-          entry_hashes = {}
-          for e in ENTRIES:
-              if not os.path.exists(e):
-                  sys.exit(f"missing entrypoint: {e}")
-              entry_hashes[e] = "sha256:" + sha256(e)
+# Decode public key
+base64 -d "../$PUB_B64" > pq_pubkey.bin
 
-          # --------------------------------------------------------
-          # PINNED PACKAGES (CANONICAL ORDER)
-          # --------------------------------------------------------
-          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
-          pinned = []
+# Download + verify liboqs tarball
+TARBALL="liboqs-${OQS_VER}.tar.gz"
+if [ ! -f "$TARBALL" ]; then
+  echo "Downloading liboqs ${OQS_VER}..."
+  curl -fsSL "$OQS_URL" -o "$TARBALL"
+fi
 
-          with open(REQ, encoding="utf-8") as f:
-              for line in f:
-                  m = pkg_re.match(line.strip())
-                  if m:
-                      pinned.append({
-                          "name": m.group(1).lower(),
-                          "version": m.group(2),
-                      })
+echo "${OQS_SHA}  ${TARBALL}" | sha256sum -c -
 
-          pinned.sort(key=lambda x: x["name"])
+# Extract
+SRC_DIR="liboqs-${OQS_VER}-src"
+rm -rf "$SRC_DIR"
+mkdir -p "$SRC_DIR"
+tar -xzf "$TARBALL" -C "$SRC_DIR" --strip-components=1
 
-          # --------------------------------------------------------
-          # CANONICAL MANIFEST
-          # --------------------------------------------------------
-          manifest = {
-              "format": "pq-lock-manifest-v1",
-              "pq_alg": ALG,
-              "requirements_txt_sha256": req_sha,
-              "entrypoints": entry_hashes,
-              "pinned": pinned,
-          }
+# Build liboqs
+echo "Building liboqs..."
+cmake -S "$SRC_DIR" -B "$SRC_DIR/build" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$SRC_DIR/build" -j"$(nproc)"
 
-          canonical = json.dumps(
-              manifest,
-              sort_keys=True,
-              separators=(",", ":"),
-          ).encode("utf-8")
+# C verifier using liboqs
+cat > verify_pq.c <<'"'"'C'"'"'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <oqs/oqs.h>
 
-          # --------------------------------------------------------
-          # PQ SIGN
-          # --------------------------------------------------------
-          with oqs.Signature(ALG) as signer:
-              pub = signer.generate_keypair()
-              sig = signer.sign(canonical)
+static unsigned char *read_file(const char *path, size_t *len_out) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+  long sz = ftell(f);
+  if (sz < 0) { fclose(f); return NULL; }
+  rewind(f);
+  unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+  if (!buf) { fclose(f); return NULL; }
+  size_t n = fread(buf, 1, (size_t)sz, f);
+  fclose(f);
+  if (n != (size_t)sz) { free(buf); return NULL; }
+  *len_out = (size_t)sz;
+  return buf;
+}
 
-          with open("lock.manifest.json", "wb") as f:
-              f.write(canonical + b"\n")
+int main(int argc, char **argv) {
+  if (argc != 5) {
+    fprintf(stderr, "Usage: %s <ALG> <MANIFEST_JSON> <SIG_BIN> <PUBKEY_BIN>\n", argv[0]);
+    return 2;
+  }
+  const char *alg = argv[1];
+  const char *manifest_path = argv[2];
+  const char *sig_path = argv[3];
+  const char *pk_path = argv[4];
 
-          with open("lock.manifest.pqsig", "wb") as f:
-              f.write(sig)
+  OQS_SIG *sig = OQS_SIG_new(alg);
+  if (sig == NULL) {
+    fprintf(stderr, "ERROR: OQS_SIG_new failed for alg=%s\n", alg);
+    return 3;
+  }
 
-          with open("pq_pubkey.b64", "w", encoding="utf-8") as f:
-              f.write(base64.b64encode(pub).decode("ascii") + "\n")
+  size_t msg_len=0, sig_len=0, pk_len=0;
+  unsigned char *msg = read_file(manifest_path, &msg_len);
+  unsigned char *sigbuf = read_file(sig_path, &sig_len);
+  unsigned char *pk = read_file(pk_path, &pk_len);
 
-          # --------------------------------------------------------
-          # SELF-VERIFY (FAIL-CLOSED)
-          # --------------------------------------------------------
-          with oqs.Signature(ALG) as verifier:
-              if not verifier.verify(canonical, sig, pub):
-                  sys.exit("FATAL: PQ self-verification failed")
+  if (!msg || !sigbuf || !pk) {
+    fprintf(stderr, "ERROR: failed to read one or more files\n");
+    OQS_SIG_free(sig);
+    free(msg); free(sigbuf); free(pk);
+    return 4;
+  }
 
-          print("OK: requirements + entrypoints PQ-signed")
-          PY
+  if (pk_len != sig->length_public_key) {
+    fprintf(stderr, "ERROR: public key length mismatch (got=%zu expected=%zu)\n",
+            pk_len, sig->length_public_key);
+    OQS_SIG_free(sig);
+    free(msg); free(sigbuf); free(pk);
+    return 5;
+  }
+  if (sig_len != sig->length_signature) {
+    fprintf(stderr, "ERROR: signature length mismatch (got=%zu expected=%zu)\n",
+            sig_len, sig->length_signature);
+    OQS_SIG_free(sig);
+    free(msg); free(sigbuf); free(pk);
+    return 6;
+  }
 
-          python /tmp/pq_sign_lock.py
+  OQS_STATUS ok = OQS_SIG_verify(sig, msg, msg_len, sigbuf, sig_len, pk);
+  OQS_SIG_free(sig);
+  free(msg); free(sigbuf); free(pk);
 
-      # ------------------------------------------------------------
-      # ARTIFACT UPLOAD
-      # ------------------------------------------------------------
-      - name: Upload PQ-locked materials
-        uses: actions/upload-artifact@v4
-        with:
-          name: pq-locked-naza-bundle
-          path: |
-            requirements.txt
-            lock.manifest.json
-            lock.manifest.pqsig
-            pq_pubkey.b64
-          retention-days: 30
+  if (ok != OQS_SUCCESS) {
+    fprintf(stderr, "ERROR: PQ signature verification FAILED\n");
+    return 7;
+  }
+
+  printf("OK: PQ signature verified (%s) and requirements.txt sha256 matches manifest\n", alg);
+  return 0;
+}
+C
+
+# Compile verifier
+echo "Compiling verifier..."
+gcc -O2 -I "$SRC_DIR/build/include" -I "$SRC_DIR/include" verify_pq.c \
+  -L "$SRC_DIR/build/lib" -loqs -lcrypto -lpthread -ldl -o pq_verify_bin
+
+# Run verification (uses LD_LIBRARY_PATH to find liboqs)
+echo "Verifying PQ signature..."
+LD_LIBRARY_PATH="$SRC_DIR/build/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  ./pq_verify_bin "$REQ_PQ_ALG" "../$MAN" "../$SIG" pq_pubkey.bin
+SH
+
+chmod +x pq_verify_lock.sh
+./pq_verify_lock.sh
+
+# Only after verification succeeds: install deps with hash enforcement
+python3 -m venv venv
+# shellcheck disable=SC1091
+source venv/bin/activate
+pip install --upgrade pip
+pip install --require-hashes -r requirements.txt
+
+chmod +x main.py || true
+echo "PQ-verified setup complete inside Ubuntu"
+'
+
+echo "Setup complete inside Ubuntu"
+EOF
+
+# ============================================================
+# FINAL STEP: FORCE AUTO-START WITH YOUR EXACT BANNER + FULL TTY
+# ============================================================
+
+cat > ~/.bashrc <<'BASHRC'
+# === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
+if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
+    export NAZA_STARTED=1
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║          Starting SecureLLM TUI (naza/main.py)           ║"
+    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "   Type 'exit' twice to return to Termux"
+    echo ""
+
+    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
+        cd /home/sudouser/naza || exit 1
+
+        # Activate venv
+        source venv/bin/activate || exit 1
+
+        # Fix terminal + locale + unbuffered output
+        export TERM=xterm-256color
+        export LANG=C.UTF-8
+        export PYTHONUNBUFFERED=1
+
+        clear
+        echo 'Starting main.py in venv...'
+        exec python -u main.py
+    "
+
+    clear
+    echo "Returned to Termux."
+fi
+BASHRC
+
+echo "alias naza='proot-distro login ubuntu --user sudouser -- bash -c \"cd ~/naza && source venv/bin/activate && python -u main.py\"'" >> ~/.bashrc
+
+echo "--------------------------------------------------------------"
+echo "ALL DONE!"
+echo "Close and reopen Termux (or run: bash)"
+echo "SecureLLM will auto-start. Dependencies are installed ONLY after PQ verification passes."
+echo "--------------------------------------------------------------"
