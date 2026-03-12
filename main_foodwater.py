@@ -1,4 +1,4 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
@@ -202,41 +202,48 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
 
 async def init_db(key: bytes):
     if not DB_PATH.exists():
-        async with aiosqlite.connect("temp.db") as db:
+        temp_path = allocate_temp_db_path()
+        async with aiosqlite.connect(temp_path) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
             await db.commit()
-        with open("temp.db","rb") as f:
-            enc = aes_encrypt(f.read(), key)
-        DB_PATH.write_bytes(enc)
-        os.remove("temp.db")
+        try:
+            with temp_path.open("rb") as f:
+                enc = aes_encrypt(f.read(), key)
+            DB_PATH.write_bytes(enc)
+        finally:
+            safe_cleanup([temp_path])
 
 async def log_interaction(prompt: str, response: str, key: bytes):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
-    async with aiosqlite.connect(dec) as db:
-        await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
-        await db.commit()
-    with dec.open("rb") as f:
-        enc = aes_encrypt(f.read(), key)
-    DB_PATH.write_bytes(enc)
-    dec.unlink()
+    dec = allocate_temp_db_path()
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+            await db.commit()
+        with dec.open("rb") as f:
+            enc = aes_encrypt(f.read(), key)
+        DB_PATH.write_bytes(enc)
+    finally:
+        safe_cleanup([dec])
 
 async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[str]=None):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
+    dec = allocate_temp_db_path()
     rows=[]
-    async with aiosqlite.connect(dec) as db:
-        if search:
-            q = f"%{search}%"
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-        else:
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-    with dec.open("rb") as f:
-        DB_PATH.write_bytes(aes_encrypt(f.read(), key))
-    dec.unlink()
-    return rows
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            if search:
+                q = f"%{search}%"
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+            else:
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+        with dec.open("rb") as f:
+            DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+        return rows
+    finally:
+        safe_cleanup([dec])
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
@@ -246,7 +253,7 @@ import sys
 import time
 from typing import Dict
 
-# try to import psutil but don't crash here
+
 try:
     import psutil
 except Exception:
@@ -396,71 +403,40 @@ def _read_temperature():
 
 
 def collect_system_metrics() -> Dict[str, float]:
-    
-    
-    cpu = mem = load1 = temp = proc = None
+    if psutil is None:
+        raise RuntimeError("psutil is required for system metrics")
 
-    
-    if psutil is not None:
+    try:
+        cpu = psutil.cpu_percent(interval=0.1) / 100.0
+        mem = psutil.virtual_memory().percent / 100.0
         try:
-            cpu = psutil.cpu_percent(interval=0.1) / 100.0
-            mem = psutil.virtual_memory().percent / 100.0
-            try:
-                load_raw = os.getloadavg()[0]
-                cpu_cnt = psutil.cpu_count(logical=True) or 1
-                load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
-            except Exception:
-                load1 = None
-            try:
-                temps_map = psutil.sensors_temperatures()
-                if temps_map:
-                    
-                    first = next(iter(temps_map.values()))[0].current
-                    temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
-                else:
-                    temp = None
-            except Exception:
-                temp = None
-            try:
-                proc = min(len(psutil.pids()) / 1000.0, 1.0)
-            except Exception:
-                proc = None
+            load_raw = os.getloadavg()[0]
+            cpu_cnt = psutil.cpu_count(logical=True) or 1
+            load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
         except Exception:
-            
-            cpu = mem = load1 = temp = proc = None
+            load1 = cpu
+        try:
+            temps_map = psutil.sensors_temperatures()
+            if temps_map:
+                first = next(iter(temps_map.values()))[0].current
+                temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
+            else:
+                temp = 0.0
+        except Exception:
+            temp = 0.0
+    except Exception as exc:
+        raise RuntimeError(f"Unable to obtain psutil system metrics: {exc}") from exc
 
-    
-    if cpu is None:
-        cpu = _cpu_percent_from_proc()
-    if mem is None:
-        mem = _mem_from_proc()
-    if load1 is None:
-        load1 = _load1_from_proc()
-    if proc is None:
-        proc = _proc_count_from_proc()
-    if temp is None:
-        temp = _read_temperature()  # temp optional; can be None
-
-    
-    core_ok = all(x is not None for x in (cpu, mem, load1, proc))
-    if not core_ok:
-        
-        missing = [name for name, val in (("cpu", cpu), ("mem", mem), ("load1", load1), ("proc", proc)) if val is None]
-        print(f"[FATAL] Unable to obtain core system metrics: missing {missing}")
-        sys.exit(2)
-
-    
-    cpu = float(max(0.0, min(1.0, cpu)))
-    mem = float(max(0.0, min(1.0, mem)))
-    load1 = float(max(0.0, min(1.0, load1)))
-    proc = float(max(0.0, min(1.0, proc)))
-    temp = float(max(0.0, min(1.0, temp))) if temp is not None else 0.0
-
-    return {"cpu": cpu, "mem": mem, "load1": load1, "temp": temp, "proc": proc}
+    return {
+        "cpu": float(max(0.0, min(1.0, cpu))),
+        "mem": float(max(0.0, min(1.0, mem))),
+        "load1": float(max(0.0, min(1.0, load1))),
+        "temp": float(max(0.0, min(1.0, temp))),
+    }
 
 def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
-    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0); proc = metrics.get("proc",0.0)
-    r = cpu * (1.0 + load1); g = mem * (1.0 + proc); b = temp * (0.5 + cpu * 0.5)
+    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0)
+    r = cpu * (1.0 + load1); g = mem * (1.0 + load1 * 0.5); b = temp * (0.5 + cpu * 0.5)
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
@@ -601,7 +577,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
         rgb = metrics_to_rgb(metrics)
         score = pennylane_entropic_score(rgb)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc_count",0.0))
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0))
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
@@ -636,6 +612,11 @@ f"[/action]\n\n"
 f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     )
     return tpl
+
+def allocate_temp_db_path() -> Path:
+    fd, path = tempfile.mkstemp(prefix="chat_history_", suffix=".db")
+    os.close(fd)
+    return Path(path)
 
 def header(status:dict):
     s = f" Secure LLM CLI — Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
@@ -800,7 +781,16 @@ async def road_scanner_flow(state:dict):
             else:
                 def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
                 result = await loop.run_in_executor(ex, run_chunked2)
-            print("\n"+(result or ""))
+            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
+            candidate = text.split()
+            label = candidate[0].capitalize() if candidate else ""
+            if label not in ("Low","Medium","High"):
+                lowered = text.lower()
+                if "low" in lowered: label = "Low"
+                elif "medium" in lowered: label = "Medium"
+                elif "high" in lowered: label = "High"
+                else: label = "Medium"
+            print("\n"+text)
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
@@ -839,7 +829,7 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = Path("temp.db")
+    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = allocate_temp_db_path()
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -909,4 +899,3 @@ def main():
 
 if __name__=="__main__":
     main()
-

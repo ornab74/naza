@@ -421,71 +421,40 @@ def _read_temperature():
 
 
 def collect_system_metrics() -> Dict[str, float]:
-    
-    
-    cpu = mem = load1 = temp = proc = None
+    if psutil is None:
+        raise RuntimeError("psutil is required for system metrics")
 
-    
-    if psutil is not None:
+    try:
+        cpu = psutil.cpu_percent(interval=0.1) / 100.0
+        mem = psutil.virtual_memory().percent / 100.0
         try:
-            cpu = psutil.cpu_percent(interval=0.1) / 100.0
-            mem = psutil.virtual_memory().percent / 100.0
-            try:
-                load_raw = os.getloadavg()[0]
-                cpu_cnt = psutil.cpu_count(logical=True) or 1
-                load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
-            except Exception:
-                load1 = None
-            try:
-                temps_map = psutil.sensors_temperatures()
-                if temps_map:
-                    
-                    first = next(iter(temps_map.values()))[0].current
-                    temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
-                else:
-                    temp = None
-            except Exception:
-                temp = None
-            try:
-                proc = min(len(psutil.pids()) / 1000.0, 1.0)
-            except Exception:
-                proc = None
+            load_raw = os.getloadavg()[0]
+            cpu_cnt = psutil.cpu_count(logical=True) or 1
+            load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
         except Exception:
-            
-            cpu = mem = load1 = temp = proc = None
+            load1 = cpu
+        try:
+            temps_map = psutil.sensors_temperatures()
+            if temps_map:
+                first = next(iter(temps_map.values()))[0].current
+                temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
+            else:
+                temp = 0.0
+        except Exception:
+            temp = 0.0
+    except Exception as exc:
+        raise RuntimeError(f"Unable to obtain psutil system metrics: {exc}") from exc
 
-    
-    if cpu is None:
-        cpu = _cpu_percent_from_proc()
-    if mem is None:
-        mem = _mem_from_proc()
-    if load1 is None:
-        load1 = _load1_from_proc()
-    if proc is None:
-        proc = _proc_count_from_proc()
-    if temp is None:
-        temp = _read_temperature()  
-
-    
-    core_ok = all(x is not None for x in (cpu, mem, load1, proc))
-    if not core_ok:
-        
-        missing = [name for name, val in (("cpu", cpu), ("mem", mem), ("load1", load1), ("proc", proc)) if val is None]
-        print(f"[FATAL] Unable to obtain core system metrics: missing {missing}")
-        sys.exit(2)
-
-    
-    cpu = float(max(0.0, min(1.0, cpu)))
-    mem = float(max(0.0, min(1.0, mem)))
-    load1 = float(max(0.0, min(1.0, load1)))
-    proc = float(max(0.0, min(1.0, proc)))
-    temp = float(max(0.0, min(1.0, temp))) if temp is not None else 0.0
-
-    return {"cpu": cpu, "mem": mem, "load1": load1, "temp": temp, "proc": proc}
+    return {
+        "cpu": float(max(0.0, min(1.0, cpu))),
+        "mem": float(max(0.0, min(1.0, mem))),
+        "load1": float(max(0.0, min(1.0, load1))),
+        "temp": float(max(0.0, min(1.0, temp))),
+    }
 
 def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
-    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0); proc = metrics.get("proc",0.0)
-    r = cpu * (1.0 + load1); g = mem * (1.0 + proc); b = temp * (0.5 + cpu * 0.5)
+    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0)
+    r = cpu * (1.0 + load1); g = mem * (1.0 + load1 * 0.5); b = temp * (0.5 + cpu * 0.5)
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
@@ -612,7 +581,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
         rgb = metrics_to_rgb(metrics)
         score = pennylane_entropic_score(rgb)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc",0.0))
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0))
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
@@ -811,7 +780,16 @@ async def road_scanner_flow(state:dict):
             else:
                 def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
                 result = await loop.run_in_executor(ex, run_chunked2)
-            print("\n"+(result or ""))
+            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
+            candidate = text.split()
+            label = candidate[0].capitalize() if candidate else ""
+            if label not in ("Low","Medium","High"):
+                lowered = text.lower()
+                if "low" in lowered: label = "Low"
+                elif "medium" in lowered: label = "Medium"
+                elif "high" in lowered: label = "High"
+                else: label = "Medium"
+            print("\n"+text)
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
