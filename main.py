@@ -192,6 +192,13 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
             print(color("SHA256 matches expected.", fg=32, bold=True))
         else:
             print(color(f"SHA256 MISMATCH! expected {expected_sha} got {sha}", fg=31, bold=True))
+            keep_file = input("Hash mismatch. Keep this download anyway? (y/N): ").strip().lower() == "y"
+            if not keep_file:
+                try:
+                    dest.unlink()
+                except Exception:
+                    pass
+                raise ValueError("Download aborted because SHA256 verification failed.")
     return sha
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
