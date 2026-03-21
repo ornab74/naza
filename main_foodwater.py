@@ -147,7 +147,13 @@ def render_screen(state: Optional[dict], kind: str, title: str, subtitle: Option
     if state is not None:
         header(state)
         print()
-    screen_banner(kind, title, subtitle)
+    if kind == "main":
+        screen_banner(kind, title, subtitle)
+    else:
+        print(color(title.center(terminal_width()), fg=36, bold=True))
+        if subtitle:
+            print(color(subtitle.center(terminal_width()), fg=90))
+        print(color("─" * terminal_width(), fg=36))
     if panel_title and panel_lines is not None:
         print(boxed(panel_title, panel_lines, width=min(terminal_width(), 88)))
 
@@ -207,7 +213,7 @@ def choose_menu(title: str, options: List[str], status: Optional[dict] = None, f
     idx = max(0, min(default_idx, len(options) - 1))
     flush_stdin_buffer()
     while True:
-        render_screen(status, "main", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer))
+        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer))
         ch = getch()
         name = key_name(ch)
         if name == "up":
@@ -959,7 +965,37 @@ def safe_cleanup(paths:List[Path]):
 def main_menu_loop(state:dict):
     options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
     while True:
-        idx = choose_menu("Main Menu", options, status=state, footer=["Choose a mode and keep moving.", "Use ↑↓ / `j``k` / number keys, Enter to select."])
+        idx = max(0, min(0, len(options) - 1))
+        flush_stdin_buffer()
+        while True:
+            render_screen(
+                state,
+                "main",
+                "Main Menu",
+                "Choose a mode and keep moving.",
+                "Main Menu",
+                menu_lines(options, idx, ["Use ↑↓ / `j``k` / number keys, Enter to select."]),
+            )
+            ch = getch()
+            name = key_name(ch)
+            if name == "up":
+                idx = (idx - 1) % len(options)
+            elif name == "down":
+                idx = (idx + 1) % len(options)
+            elif name == "enter":
+                flush_stdin_buffer()
+                break
+            elif name == "other":
+                try:
+                    raw = ch.decode(errors="ignore").strip()
+                    if raw.isdigit():
+                        choice_num = int(raw)
+                        if 1 <= choice_num <= len(options):
+                            idx = choice_num - 1
+                            flush_stdin_buffer()
+                            break
+                except Exception:
+                    pass
         choice = options[idx]
         if choice == "Model Manager": model_manager(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
