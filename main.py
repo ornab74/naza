@@ -29,7 +29,9 @@ EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619a
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 CSI = "\x1b["
-def clear_screen(): sys.stdout.write(CSI + "2J" + CSI + "H")
+def clear_screen():
+    sys.stdout.write(CSI + "2J" + CSI + "H")
+    sys.stdout.flush()
 def show_cursor(): sys.stdout.write(CSI + "?25h")
 def color(text, fg=None, bold=False):
     codes=[]
@@ -37,6 +39,54 @@ def color(text, fg=None, bold=False):
     if bold: codes.append('1')
     if not codes: return text
     return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+ASCII_ART = {
+    "main": [
+        r"    _   __                 ___    ____",
+        r"   / | / /___ _____  ____/   |  /  _/",
+        r"  /  |/ / __ `/_  / / __  /| |  / /  ",
+        r" / /|  / /_/ / / /_/ /_/ ___ |_/ /   ",
+        r"/_/ |_/\__,_/ /___/\__,_/_/  |_/___/  ",
+    ],
+    "model": [
+        r"    __  ___          __   __",
+        r"   /  |/  /___  ____/ /__/ /",
+        r"  / /|_/ / __ \/ __  / _  / ",
+        r" / /  / / /_/ / /_/ /  __/  ",
+        r"/_/  /_/\____/\__,_/\___/   ",
+    ],
+    "chat": [
+        r"   ________          __ ",
+        r"  / ____/ /_  ____ _/ /_",
+        r" / /   / __ \/ __ `/ __/",
+        r"/ /___/ / / / /_/ / /_  ",
+        r"\____/_/ /_/\__,_/\__/  ",
+    ],
+    "scan": [
+        r"    ____                  __   _____",
+        r"   / __ \____  ____ _____/ /  / ___/____________ _____",
+        r"  / /_/ / __ \/ __ `/ __  /   \__ \/ ___/ __ `/ __ `__ \ ",
+        r" / _, _/ /_/ / /_/ / /_/ /   ___/ / /__/ /_/ / / / / / /",
+        r"/_/ |_|\____/\__,_/\__,_/   /____/\___/\__,_/_/ /_/ /_/ ",
+    ],
+    "history": [
+        r"    __  ___     __            ",
+        r"   / / / (_)___/ /_____  _____",
+        r"  / /_/ / / __  / __/ / / / _ \ ",
+        r" / __  / / /_/ / /_/ /_/ /  __/",
+        r"/_/ /_/_/\__,_/\__/\__, /\___/ ",
+        r"                  /____/       ",
+    ],
+    "rekey": [
+        r"    ____      __              ",
+        r"   / __ \___  / /_____  __  __",
+        r"  / /_/ / _ \/ //_/ _ \/ / / /",
+        r" / _, _/  __/ ,< /  __/ /_/ / ",
+        r"/_/ |_|\___/_/|_|\___/\__, /  ",
+        r"                     /____/   ",
+    ],
+}
+
 def boxed(title: str, lines: List[str], width: int = 72):
     top = "┌" + "─"*(width-2) + "┐"
     bot = "└" + "─"*(width-2) + "┘"
@@ -51,35 +101,149 @@ def boxed(title: str, lines: List[str], width: int = 72):
             body.append(f"│ {c:{width-4}} │")
     return "\n".join([top, title_line] + body + [bot])
 
+def flush_stdin_buffer():
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        return
+    except Exception:
+        pass
+    try:
+        import select
+        fd = sys.stdin.fileno()
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if not ready:
+                break
+            if not os.read(fd, 1024):
+                break
+    except Exception:
+        pass
+
+def terminal_width(default: int = 88) -> int:
+    try:
+        return max(72, shutil.get_terminal_size((default, 24)).columns)
+    except Exception:
+        return default
+
+def center_line(text: str, width: int) -> str:
+    visible = len(re.sub(r"\x1b\[[0-9;]*m", "", text))
+    pad = max(0, (width - visible) // 2)
+    return " " * pad + text
+
+def screen_banner(kind: str, title: str, subtitle: Optional[str] = None):
+    width = terminal_width()
+    art = ASCII_ART.get(kind, ASCII_ART["main"])
+    print(color("═" * width, fg=36, bold=True))
+    for line in art:
+        print(center_line(color(line, fg=36, bold=True), width))
+    print(center_line(color(title, fg=37, bold=True), width))
+    if subtitle:
+        print(center_line(color(subtitle, fg=90), width))
+    print(color("═" * width, fg=36, bold=True))
+
+def render_screen(state: Optional[dict], kind: str, title: str, subtitle: Optional[str] = None, panel_title: Optional[str] = None, panel_lines: Optional[List[str]] = None):
+    clear_screen()
+    if state is not None:
+        header(state)
+        print()
+    screen_banner(kind, title, subtitle)
+    if panel_title and panel_lines is not None:
+        print(boxed(panel_title, panel_lines, width=min(terminal_width(), 88)))
+
 def getch():
     try:
-        import tty, termios
+        import tty, termios, select
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
-            ch = os.read(fd, 3)
-            return ch
+            first = os.read(fd, 1)
+            if not first:
+                return b""
+            if first == b"\x1b":
+                seq = bytearray(first)
+                for _ in range(5):
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.03)
+                    if not ready:
+                        break
+                    chunk = os.read(fd, 1)
+                    if not chunk:
+                        break
+                    seq.extend(chunk)
+                return bytes(seq)
+            return first
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
     except (ImportError, AttributeError, OSError):
-        
         s = input()
         return s[0].encode() if s else b''
 
+def key_name(ch: bytes) -> str:
+    if ch in (b"\r", b"\n", b"\x0d"):
+        return "enter"
+    if ch in (b"\x1b[A", b"\x1bOA", b"k"):
+        return "up"
+    if ch in (b"\x1b[B", b"\x1bOB", b"j"):
+        return "down"
+    if ch in (b"\x1b[C", b"\x1bOC", b"l"):
+        return "right"
+    if ch in (b"\x1b[D", b"\x1bOD", b"h"):
+        return "left"
+    if ch in (b"\x1b", b"q", b"Q"):
+        return "escape"
+    return "other"
+
+def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None) -> List[str]:
+    lines = []
+    for i, opt in enumerate(options):
+        prefix = color("›", fg=36, bold=True) if i == selected_idx else " "
+        lines.append(f"{prefix} {i+1}) {opt}")
+    if footer:
+        lines.append("")
+        lines.extend(footer)
+    return lines
+
+def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0) -> int:
+    idx = max(0, min(default_idx, len(options) - 1))
+    flush_stdin_buffer()
+    while True:
+        render_screen(status, "main", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer))
+        ch = getch()
+        name = key_name(ch)
+        if name == "up":
+            idx = (idx - 1) % len(options)
+        elif name == "down":
+            idx = (idx + 1) % len(options)
+        elif name == "enter":
+            flush_stdin_buffer()
+            return idx
+        elif name == "other":
+            try:
+                raw = ch.decode(errors="ignore").strip()
+                if raw.isdigit():
+                    choice = int(raw)
+                    if 1 <= choice <= len(options):
+                        flush_stdin_buffer()
+                        return choice - 1
+            except Exception:
+                pass
 
 def read_menu_choice(num_items:int, prompt="Use ↑↓ arrows or number, Enter to select: ")->int:
     print(prompt)
+    flush_stdin_buffer()
     try:
         idx = 0
         while True:
             ch = getch()
             if not ch: continue
-            if ch == b'\x1b[A' or ch == b'\x1b\x00A':
+            name = key_name(ch)
+            if name == "up":
                 idx = (idx - 1) % num_items
-            elif ch == b'\x1b[B' or ch == b'\x1b\x00B':
+            elif name == "down":
                 idx = (idx + 1) % num_items
-            elif ch in (b'\r', b'\n', b'\x0d'):
+            elif name == "enter":
+                flush_stdin_buffer()
                 return idx
             else:
                 try:
@@ -477,16 +641,30 @@ f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     return tpl
 
 def header(status:dict):
-    s = f" Secure LLM CLI — Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
-    print(color(s.center(80,'─'), fg=35, bold=True))
+    s = f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
+    print(color(s.center(terminal_width(), '─'), fg=35, bold=True))
 
 def model_manager(state:dict):
+    options = [
+        "Download model from remote repo (httpx)",
+        "Verify plaintext model hash (compute SHA256)",
+        "Encrypt plaintext model -> .aes",
+        "Decrypt .aes -> plaintext (temporary)",
+        "Delete plaintext model",
+        "Back",
+    ]
     while True:
-        clear_screen(); header(state)
-        lines=["1) Download model from remote repo (httpx)","2) Verify plaintext model hash (compute SHA256)","3) Encrypt plaintext model -> .aes","4) Decrypt .aes -> plaintext (temporary)","5) Delete plaintext model","6) Back"]
-        print(boxed("Model Manager", lines))
-        choice = input("Choose (1-6): ").strip()
-        if choice=="1":
+        idx = choose_menu(
+            "Model Manager",
+            options,
+            status=state,
+            footer=[
+                "Manage the local GGUF model, verify integrity, and protect plaintext copies.",
+                "Use ↑↓ / `j``k` / number keys, Enter to select.",
+            ],
+        )
+        choice = str(idx + 1)
+        if choice == "1":
             if MODEL_PATH.exists():
                 if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
             try:
@@ -530,7 +708,15 @@ async def chat_session(state:dict):
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            print("Loading model..."); llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            render_screen(
+                state,
+                "chat",
+                "Live Chat",
+                "Encrypted model session with local history logging.",
+                "Boot Sequence",
+                ["Decrypting model payload...", "Loading llama.cpp runtime...", "Preparing secure chat loop..."],
+            )
+            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
         except Exception as e:
             print(f"Failed to load: {e}")
             if MODEL_PATH.exists():
@@ -540,6 +726,14 @@ async def chat_session(state:dict):
         state['model_loaded']=True
         try:
             await init_db(state['key'])
+            render_screen(
+                state,
+                "chat",
+                "Live Chat",
+                "Ask questions, review local history, or exit back to the menu.",
+                "Commands",
+                ["/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
+            )
             print("Type /exit to return, /history to show last 10 messages.")
             while True:
                 prompt = input("\nYou> ").strip()
@@ -574,8 +768,14 @@ async def chat_session(state:dict):
 async def road_scanner_flow(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
     data={}
-    clear_screen(); header(state)
-    print(boxed("Road Scanner - Step 1/6", ["Leave blank for defaults"]))
+    render_screen(
+        state,
+        "scan",
+        "Road Scanner",
+        "Capture scene details and classify road risk.",
+        "Step 1/6",
+        ["Leave blank to accept defaults.", "The final report screen now stays open until you choose an action."],
+    )
     data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip() or "unspecified location"
     data['road_type'] = input("Road type (highway/urban/residential): ").strip() or "highway"
     data['weather'] = input("Weather/visibility: ").strip() or "clear"
@@ -622,13 +822,23 @@ async def road_scanner_flow(state:dict):
             elif "medium" in lowered: label = "Medium"
             elif "high" in lowered: label = "High"
             else: label = "Medium"
-        print("\n--- Road Scanner Result ---\n")
-        if label == "Low": print(color(label, fg=32, bold=True))
-        elif label == "Medium": print(color(label, fg=33, bold=True))
-        else: print(color(label, fg=31, bold=True))
-        print("\nOptions: 1) Re-run with edits  2) Export to JSON  3) Save & return  4) Cancel")
-        ch = input("Choose (1-4): ").strip()
-        if ch=="1":
+        while True:
+            detail_lines = [
+                f"Classification: {label}",
+                f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
+                "",
+                "Preview:",
+            ]
+            detail_lines.extend((text or label).splitlines()[:6] or [label])
+            ch = choose_menu(
+                "Road Scanner Result",
+                ["Re-run with edits", "Export to JSON", "Save & return", "Cancel"],
+                status=state,
+                footer=detail_lines,
+            )
+            ch = str(ch + 1)
+            if ch != "1":
+                break
             print("Re-run: editing fields. Press Enter to keep current value.")
             for k in list(data.keys()):
                 v = input(f"{k} [{data[k]}]: ").strip()
@@ -648,7 +858,6 @@ async def road_scanner_flow(state:dict):
                 elif "medium" in lowered: label = "Medium"
                 elif "high" in lowered: label = "High"
                 else: label = "Medium"
-            print("\n"+text)
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
@@ -668,19 +877,40 @@ async def db_viewer_flow(state:dict):
     page=0; per_page=10; search=None
     while True:
         rows = await fetch_history(state['key'], limit=per_page, offset=page*per_page, search=search)
-        clear_screen(); header(state)
+        render_screen(
+            state,
+            "history",
+            "Chat History",
+            "Encrypted transcript browser with paging and search.",
+        )
         title = f"History (page {page+1})"
         print(boxed(title, [f"Search: {search or '(none)'}", "Commands: n=next p=prev s=search q=quit"]))
         if not rows: print("No rows on this page.")
         else:
             for r in rows: print(f"[{r[0]}] {r[1]}\nQ: {r[2]}\nA: {r[3]}\n" + "-"*60)
-        cmd = input("cmd (n/p/s/q): ").strip().lower()
-        if cmd=="n": page +=1
-        elif cmd=="p" and page>0: page -=1
-        elif cmd=="s": search = input("Enter search keyword (empty to clear): ").strip() or None; page = 0
-        else: break
+        cmd_idx = choose_menu(
+            "History Controls",
+            ["Next page", "Previous page", "Search", "Back"],
+            status=state,
+            footer=[f"Current search: {search or '(none)'}"],
+        )
+        if cmd_idx == 0:
+            page += 1
+        elif cmd_idx == 1 and page > 0:
+            page -= 1
+        elif cmd_idx == 2:
+            search = input("Enter search keyword (empty to clear): ").strip() or None
+            page = 0
+        else:
+            break
 
 def rekey_flow(state:dict):
+    render_screen(
+        state,
+        "rekey",
+        "Rekey / Rotate Key",
+        "Re-encrypt stored assets under a fresh key or passphrase.",
+    )
     print("Rekey / Rotate Key")
     if KEY_PATH.exists(): print(f"Current key file: {KEY_PATH}")
     else: print("No existing key file (creating new).")
@@ -731,9 +961,8 @@ def safe_cleanup(paths:List[Path]):
 def main_menu_loop(state:dict):
     options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
     while True:
-        clear_screen(); header(state); print()
-        print(boxed("Main Menu", [f"{i+1}) {opt}" for i,opt in enumerate(options)]))
-        idx = read_menu_choice(len(options)); choice = options[idx]
+        idx = choose_menu("Main Menu", options, status=state, footer=["Choose a mode and keep moving.", "Use ↑↓ / `j``k` / number keys, Enter to select."])
+        choice = options[idx]
         if choice == "Model Manager": model_manager(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
         elif choice == "Road Scanner": asyncio.run(road_scanner_flow(state))
