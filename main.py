@@ -1,4 +1,4 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
@@ -117,20 +117,13 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def _write_key_file(key_bytes: bytes) -> None:
-    KEY_PATH.write_bytes(key_bytes)
-    try:
-        os.chmod(KEY_PATH, 0o600)
-    except Exception:
-        pass
-
 def get_or_create_key() -> bytes:
     if KEY_PATH.exists():
         d = KEY_PATH.read_bytes()
         if len(d) >= 48: return d[16:48]
         return d[:32]
     key = AESGCM.generate_key(256)
-    _write_key_file(key)
+    KEY_PATH.write_bytes(key)
     print(f"🔑 New random key generated and saved to {KEY_PATH}")
     return key
 
@@ -156,12 +149,12 @@ def ensure_key_interactive() -> bytes:
             print("Passphrases mismatch. Aborting.")
             sys.exit(1)
         salt, key = derive_key_from_passphrase(pw)
-        _write_key_file(salt + key)
+        KEY_PATH.write_bytes(salt + key)
         print(f"Saved salt+derived key to {KEY_PATH}")
         return key
     else:
         key = AESGCM.generate_key(256)
-        _write_key_file(key)
+        KEY_PATH.write_bytes(key)
         print(f"Saved random key to {KEY_PATH}")
         return key
 
@@ -192,13 +185,6 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
             print(color("SHA256 matches expected.", fg=32, bold=True))
         else:
             print(color(f"SHA256 MISMATCH! expected {expected_sha} got {sha}", fg=31, bold=True))
-            keep_file = input("Hash mismatch. Keep this download anyway? (y/N): ").strip().lower() == "y"
-            if not keep_file:
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
-                raise ValueError("Download aborted because SHA256 verification failed.")
     return sha
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
@@ -217,103 +203,266 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     dest.write_bytes(data)
     print(f"✅ Decrypted ({len(data)} bytes)")
 
-def _temp_db_path() -> Path:
-    tmp = tempfile.NamedTemporaryFile(prefix="naza_", suffix=".db", delete=False)
-    tmp.close()
-    return Path(tmp.name)
-
 async def init_db(key: bytes):
     if not DB_PATH.exists():
-        tmp_db = _temp_db_path()
-        try:
-            async with aiosqlite.connect(tmp_db) as db:
-                await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
-                await db.commit()
-            with tmp_db.open("rb") as f:
-                enc = aes_encrypt(f.read(), key)
-            DB_PATH.write_bytes(enc)
-        finally:
-            try:
-                tmp_db.unlink()
-            except Exception:
-                pass
-
-async def log_interaction(prompt: str, response: str, key: bytes):
-    dec = _temp_db_path()
-    try:
-        decrypt_file(DB_PATH, dec, key)
-        async with aiosqlite.connect(dec) as db:
-            await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+        async with aiosqlite.connect("temp.db") as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
             await db.commit()
-        with dec.open("rb") as f:
+        with open("temp.db","rb") as f:
             enc = aes_encrypt(f.read(), key)
         DB_PATH.write_bytes(enc)
-    finally:
-        try:
-            dec.unlink()
-        except Exception:
-            pass
+        os.remove("temp.db")
+
+async def log_interaction(prompt: str, response: str, key: bytes):
+    dec = Path("temp.db")
+    decrypt_file(DB_PATH, dec, key)
+    async with aiosqlite.connect(dec) as db:
+        await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
+        await db.commit()
+    with dec.open("rb") as f:
+        enc = aes_encrypt(f.read(), key)
+    DB_PATH.write_bytes(enc)
+    dec.unlink()
 
 async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[str]=None):
+    dec = Path("temp.db")
+    decrypt_file(DB_PATH, dec, key)
     rows=[]
-    dec = _temp_db_path()
-    try:
-        decrypt_file(DB_PATH, dec, key)
-        async with aiosqlite.connect(dec) as db:
-            if search:
-                q = f"%{search}%"
-                async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
-                    async for r in cur: rows.append(r)
-            else:
-                async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
-                    async for r in cur: rows.append(r)
-        with dec.open("rb") as f:
-            DB_PATH.write_bytes(aes_encrypt(f.read(), key))
-    finally:
-        try:
-            dec.unlink()
-        except Exception:
-            pass
+    async with aiosqlite.connect(dec) as db:
+        if search:
+            q = f"%{search}%"
+            async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
+                async for r in cur: rows.append(r)
+        else:
+            async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
+                async for r in cur: rows.append(r)
+    with dec.open("rb") as f:
+        DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+    dec.unlink()
     return rows
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
-def collect_system_metrics() -> Dict[str, float]:
-    if psutil is None:
-        raise RuntimeError("psutil is required for system metrics")
+import os
+import sys
+import time
+from typing import Dict
+
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+
+def _read_proc_stat():
+    
+    try:
+        with open("/proc/stat", "r") as f:
+            line = f.readline()
+        if not line.startswith("cpu "):
+            return None
+        parts = line.split()
+        
+        vals = [int(x) for x in parts[1:]]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        total = sum(vals)
+        return total, idle
+    except Exception:
+        return None
+
+
+def _cpu_percent_from_proc(sample_interval=0.12):
+    
+    t1 = _read_proc_stat()
+    if not t1:
+        return None
+    time.sleep(sample_interval)
+    t2 = _read_proc_stat()
+    if not t2:
+        return None
+    total1, idle1 = t1
+    total2, idle2 = t2
+    total_delta = total2 - total1
+    idle_delta = idle2 - idle1
+    if total_delta <= 0:
+        return None
+    usage = (total_delta - idle_delta) / float(total_delta)
+    
+    return max(0.0, min(1.0, usage))
+
+
+def _mem_from_proc():
+    
+    try:
+        info = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) < 2:
+                    continue
+                k = parts[0].strip()
+                v = parts[1].strip().split()[0]
+                info[k] = int(v) 
+        
+        total = info.get("MemTotal")
+        available = info.get("MemAvailable", None)
+        if total is None:
+            return None
+        if available is None:
+            
+            available = info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0)
+        used_fraction = max(0.0, min(1.0, (total - available) / float(total)))
+        return used_fraction
+    except Exception:
+        return None
+
+
+def _load1_from_proc(cpu_count_fallback=1):
 
     try:
-        cpu = psutil.cpu_percent(interval=0.1) / 100.0
-        mem = psutil.virtual_memory().percent / 100.0
+        with open("/proc/loadavg", "r") as f:
+            first = f.readline().split()[0]
+        load1 = float(first)
+        
         try:
-            load_raw = os.getloadavg()[0]
-            cpu_cnt = psutil.cpu_count(logical=True) or 1
-            load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
+            cpu_cnt = os.cpu_count() or cpu_count_fallback
         except Exception:
-            load1 = cpu
-        try:
-            temps_map = psutil.sensors_temperatures()
-            if temps_map:
-                first = next(iter(temps_map.values()))[0].current
-                temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
-            else:
-                temp = 0.0
-        except Exception:
-            temp = 0.0
-    except Exception as exc:
-        raise RuntimeError(f"Unable to obtain psutil system metrics: {exc}") from exc
+            cpu_cnt = cpu_count_fallback
+        val = load1 / max(1.0, float(cpu_cnt))
+        return max(0.0, min(1.0, val))
+    except Exception:
+        return None
 
-    return {
-        "cpu": float(max(0.0, min(1.0, cpu))),
-        "mem": float(max(0.0, min(1.0, mem))),
-        "load1": float(max(0.0, min(1.0, load1))),
-        "temp": float(max(0.0, min(1.0, temp))),
-    }
+
+def _proc_count_from_proc():
+    
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit()]
+        
+        return max(0.0, min(1.0, len(pids) / 1000.0))
+    except Exception:
+        return None
+
+
+def _read_temperature():
+    
+    temps = []
+    try:
+        base = "/sys/class/thermal"
+        if os.path.isdir(base):
+            for entry in os.listdir(base):
+                if not entry.startswith("thermal_zone"):
+                    continue
+                path = os.path.join(base, entry, "temp")
+                try:
+                    with open(path, "r") as f:
+                        raw = f.read().strip()
+                    if not raw:
+                        continue
+                    
+                    val = int(raw)
+                    if val > 1000: 
+                        c = val / 1000.0
+                    else:
+                        c = float(val)
+                    temps.append(c)
+                except Exception:
+                    continue
+    
+        if not temps:
+            possible = [
+                "/sys/devices/virtual/thermal/thermal_zone0/temp",
+                "/sys/class/hwmon/hwmon0/temp1_input",
+            ]
+            for p in possible:
+                try:
+                    with open(p, "r") as f:
+                        raw = f.read().strip()
+                    if not raw:
+                        continue
+                    val = int(raw)
+                    c = val / 1000.0 if val > 1000 else float(val)
+                    temps.append(c)
+                except Exception:
+                    continue
+        if not temps:
+            return None
+        
+        avg_c = sum(temps) / len(temps)
+        norm = (avg_c - 20.0) / (90.0 - 20.0)
+        return max(0.0, min(1.0, norm))
+    except Exception:
+        return None
+
+
+def collect_system_metrics() -> Dict[str, float]:
+    
+    
+    cpu = mem = load1 = temp = proc = None
+
+    
+    if psutil is not None:
+        try:
+            cpu = psutil.cpu_percent(interval=0.1) / 100.0
+            mem = psutil.virtual_memory().percent / 100.0
+            try:
+                load_raw = os.getloadavg()[0]
+                cpu_cnt = psutil.cpu_count(logical=True) or 1
+                load1 = max(0.0, min(1.0, load_raw / max(1.0, float(cpu_cnt))))
+            except Exception:
+                load1 = None
+            try:
+                temps_map = psutil.sensors_temperatures()
+                if temps_map:
+                    
+                    first = next(iter(temps_map.values()))[0].current
+                    temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
+                else:
+                    temp = None
+            except Exception:
+                temp = None
+            try:
+                proc = min(len(psutil.pids()) / 1000.0, 1.0)
+            except Exception:
+                proc = None
+        except Exception:
+            
+            cpu = mem = load1 = temp = proc = None
+
+    
+    if cpu is None:
+        cpu = _cpu_percent_from_proc()
+    if mem is None:
+        mem = _mem_from_proc()
+    if load1 is None:
+        load1 = _load1_from_proc()
+    if proc is None:
+        proc = _proc_count_from_proc()
+    if temp is None:
+        temp = _read_temperature()  
+
+    
+    core_ok = all(x is not None for x in (cpu, mem, load1, proc))
+    if not core_ok:
+        
+        missing = [name for name, val in (("cpu", cpu), ("mem", mem), ("load1", load1), ("proc", proc)) if val is None]
+        print(f"[FATAL] Unable to obtain core system metrics: missing {missing}")
+        sys.exit(2)
+
+    
+    cpu = float(max(0.0, min(1.0, cpu)))
+    mem = float(max(0.0, min(1.0, mem)))
+    load1 = float(max(0.0, min(1.0, load1)))
+    proc = float(max(0.0, min(1.0, proc)))
+    temp = float(max(0.0, min(1.0, temp))) if temp is not None else 0.0
+
+    return {"cpu": cpu, "mem": mem, "load1": load1, "temp": temp, "proc": proc}
 
 def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
-    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0)
-    r = cpu * (1.0 + load1); g = mem * (1.0 + load1 * 0.5); b = temp * (0.5 + cpu * 0.5)
+    cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0); proc = metrics.get("proc",0.0)
+    r = cpu * (1.0 + load1); g = mem * (1.0 + proc); b = temp * (0.5 + cpu * 0.5)
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
@@ -440,7 +589,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
         rgb = metrics_to_rgb(metrics)
         score = pennylane_entropic_score(rgb)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0))
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc_count",0.0))
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
@@ -639,16 +788,7 @@ async def road_scanner_flow(state:dict):
             else:
                 def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
                 result = await loop.run_in_executor(ex, run_chunked2)
-            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-            candidate = text.split()
-            label = candidate[0].capitalize() if candidate else ""
-            if label not in ("Low","Medium","High"):
-                lowered = text.lower()
-                if "low" in lowered: label = "Low"
-                elif "medium" in lowered: label = "Medium"
-                elif "high" in lowered: label = "High"
-                else: label = "Medium"
-            print("\n"+text)
+            print("\n"+(result or ""))
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
@@ -687,7 +827,7 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = _temp_db_path()
+    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = Path("temp.db")
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -698,11 +838,11 @@ def rekey_flow(state:dict):
     except Exception as e:
         print(f"Unexpected: {e}"); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
     if choice=="1":
-        new_key = AESGCM.generate_key(256); _write_key_file(new_key); print("New random key generated and saved.")
+        new_key = AESGCM.generate_key(256); KEY_PATH.write_bytes(new_key); print("New random key generated and saved.")
     else:
         pw = getpass.getpass("Enter new passphrase: "); pw2 = getpass.getpass("Confirm: ")
         if pw!=pw2: print("Mismatch."); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
-        salt, derived = derive_key_from_passphrase(pw); _write_key_file(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
+        salt, derived = derive_key_from_passphrase(pw); KEY_PATH.write_bytes(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
     try:
         if tmp_model.exists():
             old_h = sha256_file(tmp_model)
