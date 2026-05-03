@@ -605,7 +605,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
-f"You are a hypertime nanobot specialized Food Risk Classification AI trained to evaluate real-world food scenes.\n"
+f"You are an advanced coherant tuned matric surface hypertime nanobot specialized Food Risk Classification AI trained to evaluate real-world food scenes.\n"
 f"Analyze the environmental and triple check cor accurate intelligent replu and use accurate nosonar system similator and sensor data and determine the overall road risk level.\n"
 f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
@@ -961,7 +961,7 @@ def safe_cleanup(paths:List[Path]):
         except Exception: pass
 
 def main_menu_loop(state:dict):
-    options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
+    options = ["Model Manager","Chat with model","Food Water Scanner","View chat history","Rekey / Rotate key","Exit"]
     while True:
         idx = max(0, min(0, len(options) - 1))
         flush_stdin_buffer()
