@@ -29,7 +29,9 @@ EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619a
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 CSI = "\x1b["
-def clear_screen(): sys.stdout.write(CSI + "2J" + CSI + "H")
+def clear_screen():
+    sys.stdout.write(CSI + "2J" + CSI + "H")
+    sys.stdout.flush()
 def show_cursor(): sys.stdout.write(CSI + "?25h")
 def color(text, fg=None, bold=False):
     codes=[]
@@ -37,6 +39,52 @@ def color(text, fg=None, bold=False):
     if bold: codes.append('1')
     if not codes: return text
     return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+ASCII_ART = {
+    "main": [
+        r" _   _    _    ______    _    ",
+        r"| \ | |  / \  |___  /   / \   ",
+        r"|  \| | / _ \    / /   / _ \  ",
+        r"| |\  |/ ___ \  / /   / ___ \ ",
+        "|_| \\_/_/   \\_\\/_/   /_/   \\_\\\\",
+    ],
+    "model": [
+        r" __  __  ___  ____  _____ _     ",
+        r"|  \/  |/ _ \|  _ \| ____| |    ",
+        r"| |\/| | | | | | | |  _| | |    ",
+        r"| |  | | |_| | |_| | |___| |___ ",
+        r"|_|  |_|\___/|____/|_____|_____|",
+    ],
+    "chat": [
+        r"  ____ _   _    _  _____ ",
+        r" / ___| | | |  / \|_   _|",
+        r"| |   | |_| | / _ \ | |  ",
+        r"| |___|  _  |/ ___ \| |  ",
+        r" \____|_| |_/_/   \_\_|  ",
+    ],
+    "scan": [
+        r" ____   ____    _    _   _ ",
+        r"/ ___| / ___|  / \  | \ | |",
+        r"\___ \| |     / _ \ |  \| |",
+        r" ___) | |___ / ___ \| |\  |",
+        r"|____/ \____/_/   \_\_| \_|",
+    ],
+    "history": [
+        r" _   _ ___ ____ _____ ___  ______   __",
+        r"| | | |_ _/ ___|_   _/ _ \|  _ \ \ / /",
+        r"| |_| || |\___ \ | || | | | |_) \ V / ",
+        r"|  _  || | ___) || || |_| |  _ < | |  ",
+        r"|_| |_|___|____/ |_| \___/|_| \_\|_|  ",
+    ],
+    "rekey": [
+        r" ____  _____ _  _________   __",
+        r"|  _ \| ____| |/ / ____\ \ / /",
+        r"| |_) |  _| | ' /|  _|  \ V / ",
+        r"|  _ <| |___| . \| |___  | |  ",
+        r"|_| \_\_____|_|\_\_____| |_|  ",
+    ],
+}
+
 def boxed(title: str, lines: List[str], width: int = 72):
     top = "┌" + "─"*(width-2) + "┐"
     bot = "└" + "─"*(width-2) + "┘"
@@ -51,35 +99,157 @@ def boxed(title: str, lines: List[str], width: int = 72):
             body.append(f"│ {c:{width-4}} │")
     return "\n".join([top, title_line] + body + [bot])
 
+def flush_stdin_buffer():
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        return
+    except Exception:
+        pass
+    try:
+        import select
+        fd = sys.stdin.fileno()
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if not ready:
+                break
+            if not os.read(fd, 1024):
+                break
+    except Exception:
+        pass
+
+def terminal_width(default: int = 88) -> int:
+    try:
+        return max(72, shutil.get_terminal_size((default, 24)).columns)
+    except Exception:
+        return default
+
+def center_line(text: str, width: int) -> str:
+    visible = len(re.sub(r"\x1b\[[0-9;]*m", "", text))
+    pad = max(0, (width - visible) // 2)
+    return " " * pad + text
+
+def screen_banner(kind: str, title: str, subtitle: Optional[str] = None):
+    width = terminal_width()
+    art = ASCII_ART.get(kind, ASCII_ART["main"])
+    print(color("═" * width, fg=36, bold=True))
+    for line in art:
+        print(center_line(color(line, fg=36, bold=True), width))
+    print(center_line(color(title, fg=37, bold=True), width))
+    if subtitle:
+        print(center_line(color(subtitle, fg=90), width))
+    print(color("═" * width, fg=36, bold=True))
+
+def render_screen(state: Optional[dict], kind: str, title: str, subtitle: Optional[str] = None, panel_title: Optional[str] = None, panel_lines: Optional[List[str]] = None):
+    clear_screen()
+    if state is not None:
+        header(state)
+        print()
+    if kind == "main":
+        screen_banner(kind, title, subtitle)
+    else:
+        print(color(title.center(terminal_width()), fg=36, bold=True))
+        if subtitle:
+            print(color(subtitle.center(terminal_width()), fg=90))
+        print(color("─" * terminal_width(), fg=36))
+    if panel_title and panel_lines is not None:
+        print(boxed(panel_title, panel_lines, width=min(terminal_width(), 88)))
+
 def getch():
     try:
-        import tty, termios
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            ch = os.read(fd, 3)
-            return ch
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    except (ImportError, AttributeError, OSError):
-        
-        s = input()
-        return s[0].encode() if s else b''
+        import tty, termios, select
+    except Exception:
+        return sys.stdin.read(1).encode()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        first = os.read(fd, 1)
+        if not first:
+            return b""
+        if first == b"\x1b":
+            seq = bytearray(first)
+            for _ in range(5):
+                ready, _, _ = select.select([sys.stdin], [], [], 0.03)
+                if not ready:
+                    break
+                chunk = os.read(fd, 1)
+                if not chunk:
+                    break
+                seq.extend(chunk)
+            return bytes(seq)
+        return first
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
+def key_name(ch: bytes) -> str:
+    if ch in (b"\r", b"\n", b"\x0d"):
+        return "enter"
+    if ch in (b"\x1b[A", b"\x1bOA", b"k"):
+        return "up"
+    if ch in (b"\x1b[B", b"\x1bOB", b"j"):
+        return "down"
+    if ch in (b"\x1b[C", b"\x1bOC", b"l"):
+        return "right"
+    if ch in (b"\x1b[D", b"\x1bOD", b"h"):
+        return "left"
+    if ch in (b"\x1b", b"q", b"Q"):
+        return "escape"
+    return "other"
+
+def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None, header: Optional[List[str]] = None) -> List[str]:
+    lines = []
+    if header:
+        lines.extend(header)
+        lines.append("")
+    for i, opt in enumerate(options):
+        prefix = color("›", fg=36, bold=True) if i == selected_idx else " "
+        lines.append(f"{prefix} {i+1}) {opt}")
+    if footer:
+        lines.append("")
+        lines.extend(footer)
+    return lines
+
+def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0, header: Optional[List[str]] = None) -> int:
+    idx = max(0, min(default_idx, len(options) - 1))
+    flush_stdin_buffer()
+    while True:
+        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer, header))
+        ch = getch()
+        name = key_name(ch)
+        if name == "up":
+            idx = (idx - 1) % len(options)
+        elif name == "down":
+            idx = (idx + 1) % len(options)
+        elif name == "enter":
+            flush_stdin_buffer()
+            return idx
+        elif name == "other":
+            try:
+                raw = ch.decode(errors="ignore").strip()
+                if raw.isdigit():
+                    choice = int(raw)
+                    if 1 <= choice <= len(options):
+                        flush_stdin_buffer()
+                        return choice - 1
+            except Exception:
+                pass
 
 def read_menu_choice(num_items:int, prompt="Use ↑↓ arrows or number, Enter to select: ")->int:
     print(prompt)
+    flush_stdin_buffer()
     try:
         idx = 0
         while True:
             ch = getch()
             if not ch: continue
-            if ch == b'\x1b[A' or ch == b'\x1b\x00A':
+            name = key_name(ch)
+            if name == "up":
                 idx = (idx - 1) % num_items
-            elif ch == b'\x1b[B' or ch == b'\x1b\x00B':
+            elif name == "down":
                 idx = (idx + 1) % num_items
-            elif ch in (b'\r', b'\n', b'\x0d'):
+            elif name == "enter":
+                flush_stdin_buffer()
                 return idx
             else:
                 try:
@@ -205,121 +375,56 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
 
 async def init_db(key: bytes):
     if not DB_PATH.exists():
-        async with aiosqlite.connect("temp.db") as db:
+        temp_path = allocate_temp_db_path()
+        async with aiosqlite.connect(temp_path) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+            await db.commit()
+        try:
+            with temp_path.open("rb") as f:
+                enc = aes_encrypt(f.read(), key)
+            DB_PATH.write_bytes(enc)
+        finally:
+            safe_cleanup([temp_path])
+
+async def log_interaction(prompt: str, response: str, key: bytes):
+    dec = allocate_temp_db_path()
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
             await db.commit()
         with open("temp.db","rb") as f:
             enc = aes_encrypt(f.read(), key)
         DB_PATH.write_bytes(enc)
-        os.remove("temp.db")
-
-async def log_interaction(prompt: str, response: str, key: bytes):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
-    async with aiosqlite.connect(dec) as db:
-        await db.execute("INSERT INTO history (timestamp, prompt, response) VALUES (?, ?, ?)", (time.strftime("%Y-%m-%d %H:%M:%S"), prompt, response))
-        await db.commit()
-    with dec.open("rb") as f:
-        enc = aes_encrypt(f.read(), key)
-    DB_PATH.write_bytes(enc)
-    dec.unlink()
+    finally:
+        safe_cleanup([dec])
 
 async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[str]=None):
-    dec = Path("temp.db")
-    decrypt_file(DB_PATH, dec, key)
+    dec = allocate_temp_db_path()
     rows=[]
-    async with aiosqlite.connect(dec) as db:
-        if search:
-            q = f"%{search}%"
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-        else:
-            async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
-                async for r in cur: rows.append(r)
-    with dec.open("rb") as f:
-        DB_PATH.write_bytes(aes_encrypt(f.read(), key))
-    dec.unlink()
-    return rows
+    try:
+        decrypt_file(DB_PATH, dec, key)
+        async with aiosqlite.connect(dec) as db:
+            if search:
+                q = f"%{search}%"
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history WHERE prompt LIKE ? OR response LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?", (q,q,limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+            else:
+                async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
+                    async for r in cur: rows.append(r)
+        with dec.open("rb") as f:
+            DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+        return rows
+    finally:
+        safe_cleanup([dec])
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
-import os
-import sys
-import time
-from typing import Dict
 
-
-try:
-    import psutil
-except Exception:
-    psutil = None
-
-
-def _read_proc_stat():
-    
-    try:
-        with open("/proc/stat", "r") as f:
-            line = f.readline()
-        if not line.startswith("cpu "):
-            return None
-        parts = line.split()
-        
-        vals = [int(x) for x in parts[1:]]
-        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
-        total = sum(vals)
-        return total, idle
-    except Exception:
-        return None
-
-
-def _cpu_percent_from_proc(sample_interval=0.12):
-    
-    t1 = _read_proc_stat()
-    if not t1:
-        return None
-    time.sleep(sample_interval)
-    t2 = _read_proc_stat()
-    if not t2:
-        return None
-    total1, idle1 = t1
-    total2, idle2 = t2
-    total_delta = total2 - total1
-    idle_delta = idle2 - idle1
-    if total_delta <= 0:
-        return None
-    usage = (total_delta - idle_delta) / float(total_delta)
-    
-    return max(0.0, min(1.0, usage))
-
-
-def _mem_from_proc():
-    
-    try:
-        info = {}
-        with open("/proc/meminfo", "r") as f:
-            for line in f:
-                parts = line.split(":")
-                if len(parts) < 2:
-                    continue
-                k = parts[0].strip()
-                v = parts[1].strip().split()[0]
-                info[k] = int(v) 
-        
-        total = info.get("MemTotal")
-        available = info.get("MemAvailable", None)
-        if total is None:
-            return None
-        if available is None:
-            
-            available = info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0)
-        used_fraction = max(0.0, min(1.0, (total - available) / float(total)))
-        return used_fraction
-    except Exception:
-        return None
-
-
-def _load1_from_proc(cpu_count_fallback=1):
+def collect_system_metrics() -> Dict[str, float]:
+    if psutil is None:
+        raise RuntimeError("psutil is required for system metrics")
 
     try:
         with open("/proc/loadavg", "r") as f:
@@ -468,20 +573,26 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
 
 def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
     
+
+    
     if qml is None or pnp is None:
         r, g, b = rgb
 
-    
-        ri = max(0, min(255, int(r * 255)))
-        gi = max(0, min(255, int(g * 255)))
-        bi = max(0, min(255, int(b * 255)))
+        
+        ri = int(r * 255) & 0xFF
+        gi = int(g * 255) & 0xFF
+        bi = int(b * 255) & 0xFF
 
         
         seed = (ri << 16) | (gi << 8) | bi
         random.seed(seed)
 
+        
         base = (0.3 * r + 0.4 * g + 0.3 * b)
+
+        
         noise = (random.random() - 0.5) * 0.08
+
         return max(0.0, min(1.0, base + noise))
 
     
@@ -495,20 +606,28 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
         qml.RZ(c * math.pi, wires=1)
         qml.RX((a + b) * math.pi / 2, wires=0)
         qml.RY((b + c) * math.pi / 2, wires=1)
-        return qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))
+        return (
+            qml.expval(qml.PauliZ(0)),
+            qml.expval(qml.PauliZ(1)),
+        )
 
     a, b, c = float(rgb[0]), float(rgb[1]), float(rgb[2])
 
     try:
         ev0, ev1 = circuit(a, b, c)
-        combined = ((ev0 + 1.0) / 2.0 * 0.6 +
-                    (ev1 + 1.0) / 2.0 * 0.4)
+
+        
+        combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
+
+        
         score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
+
         return float(max(0.0, min(1.0, score)))
+
     except Exception:
         
-        return float(0.5 * (a + b + c) / 3.0)
-        
+        return float(max(0.0, min(1.0, (a + b + c) / 3.0)))
+
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
 
@@ -593,30 +712,25 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
-f"You are a Hypertime Nanobot specialized Road Risk Classification AI trained to evaluate real-world driving scenes.\n"
+f"You are an advanced coherant tuned matric surface Hypertime Nanobot specialized Road Risk Classification AI trained to evaluate real-world driving scenes.\n"
 f"Analyze and Triple Check for validating accuracy the environmental and sensor data and determine the overall road risk level.\n"
 f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
 f"Scene details:\n"
 f"Location: {data.get('location','unspecified location')}\n"
-f"Road type: {data.get('road_type','unknown')}\n"
-f"Weather: {data.get('weather','unknown')}\n"
-f"Traffic: {data.get('traffic','unknown')}\n"
-f"Obstacles: {data.get('obstacles','none')}\n"
-f"Sensor notes: {data.get('sensor_notes','none')}\n"
 f"{metrics_line}\n"
 f"Quantum State: {entropy_text}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
 f"- Think through all scene factors internally but do not show reasoning.\n"
-f"- Evaluate surface, visibility, weather, traffic, and obstacles holistically.\n"
+f"- Evaluate the available road location context holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
 f"- The valid outputs are only: Low, Medium, High.\n\n"
 f"[action]\n"
-f"1) Normalize sensor inputs to comparable scales.\n"
-f"3) Map environmental risk cues -> discrete label using conservative thresholds.\n"
+f"1) Normalize available inputs to comparable scales.\n"
+f"3) Map road location risk cues -> discrete label using conservative thresholds.\n"
 f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
 f"5) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
 f"6) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
@@ -625,16 +739,35 @@ f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     )
     return tpl
 
+def allocate_temp_db_path() -> Path:
+    fd, path = tempfile.mkstemp(prefix="chat_history_", suffix=".db")
+    os.close(fd)
+    return Path(path)
+
 def header(status:dict):
-    s = f" Secure LLM CLI — Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
-    print(color(s.center(80,'─'), fg=35, bold=True))
+    s = f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
+    print(color(s.center(terminal_width(), '─'), fg=35, bold=True))
 
 def model_manager(state:dict):
+    options = [
+        "Download model from remote repo (httpx)",
+        "Verify plaintext model hash (compute SHA256)",
+        "Encrypt plaintext model -> .aes",
+        "Decrypt .aes -> plaintext (temporary)",
+        "Delete plaintext model",
+        "Back",
+    ]
     while True:
-        clear_screen(); header(state)
-        lines=["1) Download model from remote repo (httpx)","2) Verify plaintext model hash (compute SHA256)","3) Encrypt plaintext model -> .aes","4) Decrypt .aes -> plaintext (temporary)","5) Delete plaintext model","6) Back"]
-        print(boxed("Model Manager", lines))
-        choice = input("Choose (1-6): ").strip()
+        idx = choose_menu(
+            "Model Manager",
+            options,
+            status=state,
+            footer=[
+                "Manage the local GGUF model, verify integrity, and protect plaintext copies.",
+                "Use ↑↓ / `j``k` / number keys, Enter to select.",
+            ],
+        )
+        choice = str(idx + 1)
         if choice=="1":
             if MODEL_PATH.exists():
                 if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
@@ -679,7 +812,15 @@ async def chat_session(state:dict):
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            print("Loading model..."); llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            render_screen(
+                state,
+                "chat",
+                "Live Chat",
+                "Encrypted model session with local history logging.",
+                "Boot Sequence",
+                ["Decrypting model payload...", "Loading llama.cpp runtime...", "Preparing secure chat loop..."],
+            )
+            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
         except Exception as e:
             print(f"Failed to load: {e}")
             if MODEL_PATH.exists():
@@ -689,6 +830,14 @@ async def chat_session(state:dict):
         state['model_loaded']=True
         try:
             await init_db(state['key'])
+            render_screen(
+                state,
+                "chat",
+                "Live Chat",
+                "Ask questions, review local history, or exit back to the menu.",
+                "Commands",
+                ["/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
+            )
             print("Type /exit to return, /history to show last 10 messages.")
             while True:
                 prompt = input("\nYou> ").strip()
@@ -723,14 +872,15 @@ async def chat_session(state:dict):
 async def road_scanner_flow(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
     data={}
-    clear_screen(); header(state)
-    print(boxed("Road Scanner - Step 1/6", ["Leave blank for defaults"]))
-    data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip() or "unspecified location"
-    data['road_type'] = input("Road type (highway/urban/residential): ").strip() or "highway"
-    data['weather'] = input("Weather/visibility: ").strip() or "clear"
-    data['traffic'] = input("Traffic density (low/med/high): ").strip() or "low"
-    data['obstacles'] = input("Reported obstacles: ").strip() or "none"
-    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
+    render_screen(
+        state,
+        "scan",
+        "Road Scanner",
+        "Capture a road location and classify risk.",
+        "Input",
+        ["Leave blank to accept defaults.", "The final report screen now stays open until you choose an action."],
+    )
+    data['location'] = input("Location: ").strip() or "unspecified location"
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
@@ -771,13 +921,24 @@ async def road_scanner_flow(state:dict):
             elif "medium" in lowered: label = "Medium"
             elif "high" in lowered: label = "High"
             else: label = "Medium"
-        print("\n--- Road Scanner Result ---\n")
-        if label == "Low": print(color(label, fg=32, bold=True))
-        elif label == "Medium": print(color(label, fg=33, bold=True))
-        else: print(color(label, fg=31, bold=True))
-        print("\nOptions: 1) Re-run with edits  2) Export to JSON  3) Save & return  4) Cancel")
-        ch = input("Choose (1-4): ").strip()
-        if ch=="1":
+        while True:
+            result_lines = [
+                f"Classification: {label}",
+                f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
+                "",
+                "Generated output:",
+            ]
+            result_lines.extend((text or label).splitlines()[:6] or [label])
+            result_lines.extend(["", "Actions:"])
+            ch = choose_menu(
+                "Road Scanner Result",
+                ["Re-run with edits", "Export to JSON", "Save & return", "Cancel"],
+                status=state,
+                header=result_lines,
+            )
+            ch = str(ch + 1)
+            if ch != "1":
+                break
             print("Re-run: editing fields. Press Enter to keep current value.")
             for k in list(data.keys()):
                 v = input(f"{k} [{data[k]}]: ").strip()
@@ -788,7 +949,15 @@ async def road_scanner_flow(state:dict):
             else:
                 def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
                 result = await loop.run_in_executor(ex, run_chunked2)
-            print("\n"+(result or ""))
+            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
+            candidate = text.split()
+            label = candidate[0].capitalize() if candidate else ""
+            if label not in ("Low","Medium","High"):
+                lowered = text.lower()
+                if "low" in lowered: label = "Low"
+                elif "medium" in lowered: label = "Medium"
+                elif "high" in lowered: label = "High"
+                else: label = "Medium"
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
@@ -808,26 +977,47 @@ async def db_viewer_flow(state:dict):
     page=0; per_page=10; search=None
     while True:
         rows = await fetch_history(state['key'], limit=per_page, offset=page*per_page, search=search)
-        clear_screen(); header(state)
+        render_screen(
+            state,
+            "history",
+            "Chat History",
+            "Encrypted transcript browser with paging and search.",
+        )
         title = f"History (page {page+1})"
         print(boxed(title, [f"Search: {search or '(none)'}", "Commands: n=next p=prev s=search q=quit"]))
         if not rows: print("No rows on this page.")
         else:
             for r in rows: print(f"[{r[0]}] {r[1]}\nQ: {r[2]}\nA: {r[3]}\n" + "-"*60)
-        cmd = input("cmd (n/p/s/q): ").strip().lower()
-        if cmd=="n": page +=1
-        elif cmd=="p" and page>0: page -=1
-        elif cmd=="s": search = input("Enter search keyword (empty to clear): ").strip() or None; page = 0
-        else: break
+        cmd_idx = choose_menu(
+            "History Controls",
+            ["Next page", "Previous page", "Search", "Back"],
+            status=state,
+            footer=[f"Current search: {search or '(none)'}"],
+        )
+        if cmd_idx == 0:
+            page += 1
+        elif cmd_idx == 1 and page > 0:
+            page -= 1
+        elif cmd_idx == 2:
+            search = input("Enter search keyword (empty to clear): ").strip() or None
+            page = 0
+        else:
+            break
 
 def rekey_flow(state:dict):
+    render_screen(
+        state,
+        "rekey",
+        "Rekey / Rotate Key",
+        "Re-encrypt stored assets under a fresh key or passphrase.",
+    )
     print("Rekey / Rotate Key")
     if KEY_PATH.exists(): print(f"Current key file: {KEY_PATH}")
     else: print("No existing key file (creating new).")
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = Path("temp.db")
+    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = allocate_temp_db_path()
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -871,9 +1061,38 @@ def safe_cleanup(paths:List[Path]):
 def main_menu_loop(state:dict):
     options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
     while True:
-        clear_screen(); header(state); print()
-        print(boxed("Main Menu", [f"{i+1}) {opt}" for i,opt in enumerate(options)]))
-        idx = read_menu_choice(len(options)); choice = options[idx]
+        idx = max(0, min(0, len(options) - 1))
+        flush_stdin_buffer()
+        while True:
+            render_screen(
+                state,
+                "main",
+                "Main Menu",
+                "Choose a mode and keep moving.",
+                "Main Menu",
+                menu_lines(options, idx, ["Use ↑↓ / `j``k` / number keys, Enter to select."]),
+            )
+            ch = getch()
+            name = key_name(ch)
+            if name == "up":
+                idx = (idx - 1) % len(options)
+            elif name == "down":
+                idx = (idx + 1) % len(options)
+            elif name == "enter":
+                flush_stdin_buffer()
+                break
+            elif name == "other":
+                try:
+                    raw = ch.decode(errors="ignore").strip()
+                    if raw.isdigit():
+                        choice_num = int(raw)
+                        if 1 <= choice_num <= len(options):
+                            idx = choice_num - 1
+                            flush_stdin_buffer()
+                            break
+                except Exception:
+                    pass
+        choice = options[idx]
         if choice == "Model Manager": model_manager(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
         elif choice == "Road Scanner": asyncio.run(road_scanner_flow(state))

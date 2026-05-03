@@ -49,7 +49,7 @@ su - sudouser -c "
     source venv/bin/activate
     pip install --upgrade pip
     [ -f requirements.txt ] && pip install -r requirements.txt || true
-    chmod +x main.py
+    chmod +x main.py main_foodwater.py
 "
 
 echo "Setup complete inside Ubuntu"
@@ -61,15 +61,31 @@ EOF
 
 cat > ~/.bashrc <<'BASHRC'
 # === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
-if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
-    export NAZA_STARTED=1
+choose_naza_app() {
+    echo ""
+    echo "Choose SecureLLM app:"
+    echo "  1) Road Scanner        (main.py)"
+    echo "  2) Food / Water Scanner (main_foodwater.py)"
+    echo ""
+    read -r -p "Selection [1]: " NAZA_APP_CHOICE
+
+    case "$NAZA_APP_CHOICE" in
+        2|food|foodwater|food-water|main_foodwater.py)
+            NAZA_APP_FILE="main_foodwater.py"
+            NAZA_APP_NAME="Food / Water Scanner"
+            ;;
+        *)
+            NAZA_APP_FILE="main.py"
+            NAZA_APP_NAME="Road Scanner"
+            ;;
+    esac
+}
+
+run_naza_app() {
+    choose_naza_app
 
     echo ""
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║          Starting SecureLLM TUI (naza/main.py)           ║"
-    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo "   Type 'exit' twice to return to Termux"
+    echo "Launching $NAZA_APP_NAME ($NAZA_APP_FILE)..."
     echo ""
 
     proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
@@ -83,19 +99,43 @@ if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -
         export LANG=C.UTF-8
         export PYTHONUNBUFFERED=1
         
-        # Run your TUI interactively with full pseudo-tty
+        # Run selected TUI interactively with full pseudo-tty
         clear
-        echo 'Starting main.py in venv...'
-        exec python -u main.py
+        if [ ! -f '$NAZA_APP_FILE' ]; then
+            echo 'Missing selected app file: $NAZA_APP_FILE'
+            exit 1
+        fi
+        echo 'Starting $NAZA_APP_FILE in venv...'
+        exec python -u '$NAZA_APP_FILE'
     "
+}
+
+if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
+    export NAZA_STARTED=1
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║          Starting SecureLLM TUI (choose app)             ║"
+    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "   Type 'exit' twice to return to Termux"
+    echo ""
+
+    run_naza_app
     
     clear
     echo "Returned to Termux."
 fi
 BASHRC
 
-# Optional: add alias if someone wants to start manually too
-echo "alias naza='proot-distro login ubuntu --user sudouser -- bash -c \"cd ~/naza && source venv/bin/activate && python -u main.py\"'" >> ~/.bashrc
+# Manual launcher is available after setup with: naza
+cat >> ~/.bashrc <<'BASHRC'
+
+# Manual SecureLLM launcher with app selection
+naza() {
+    run_naza_app
+}
+BASHRC
 
 echo "--------------------------------------------------------------"
 echo "ALL DONE!"
