@@ -197,8 +197,11 @@ def key_name(ch: bytes) -> str:
         return "escape"
     return "other"
 
-def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None) -> List[str]:
+def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None, header: Optional[List[str]] = None) -> List[str]:
     lines = []
+    if header:
+        lines.extend(header)
+        lines.append("")
     for i, opt in enumerate(options):
         prefix = color("›", fg=36, bold=True) if i == selected_idx else " "
         lines.append(f"{prefix} {i+1}) {opt}")
@@ -207,11 +210,11 @@ def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]
         lines.extend(footer)
     return lines
 
-def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0) -> int:
+def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0, header: Optional[List[str]] = None) -> int:
     idx = max(0, min(default_idx, len(options) - 1))
     flush_stdin_buffer()
     while True:
-        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer))
+        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer, header))
         ch = getch()
         name = key_name(ch)
         if name == "up":
@@ -611,24 +614,19 @@ f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
 f"Scene details:\n"
 f"Location: {data.get('location','unspecified location')}\n"
-f"Road type: {data.get('road_type','unknown')}\n"
-f"Weather: {data.get('weather','unknown')}\n"
-f"Traffic: {data.get('traffic','unknown')}\n"
-f"Obstacles: {data.get('obstacles','none')}\n"
-f"Sensor notes: {data.get('sensor_notes','none')}\n"
 f"{metrics_line}\n"
 f"Quantum State: {entropy_text}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
 f"- Think through all scene factors internally but do not show reasoning.\n"
-f"- Evaluate surface, visibility, weather, traffic, and obstacles holistically.\n"
+f"- Evaluate the available road location context holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
 f"- The valid outputs are only: Low, Medium, High.\n\n"
 f"[action]\n"
-f"1) Normalize sensor inputs to comparable scales.\n"
-f"3) Map environmental risk cues -> discrete label using conservative thresholds.\n"
+f"1) Normalize available inputs to comparable scales.\n"
+f"3) Map road location risk cues -> discrete label using conservative thresholds.\n"
 f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
 f"5) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
 f"6) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
@@ -773,17 +771,12 @@ async def road_scanner_flow(state:dict):
     render_screen(
         state,
         "scan",
-        "Food / Water Scanner",
-        "Capture food or water conditions and classify risk.",
-        "Step 1/6",
+        "Road Scanner",
+        "Capture a road location and classify risk.",
+        "Input",
         ["Leave blank to accept defaults.", "The final report screen now stays open until you choose an action."],
     )
-    data['location'] = input("Location (e.g., whole foods'): ").strip() or "unspecified location"
-    data['road_type'] = input("food or water type: ").strip() or "highway"
-    data['weather'] = input("Condition ").strip() or "clear"
-    data['traffic'] = input("Temperture ").strip() or "low"
-    data['obstacles'] = input("Cooked Frozen Or uncooked ").strip() or "none"
-    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
+    data['location'] = input("Location: ").strip() or "unspecified location"
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
@@ -825,18 +818,19 @@ async def road_scanner_flow(state:dict):
             elif "high" in lowered: label = "High"
             else: label = "Medium"
         while True:
-            detail_lines = [
+            result_lines = [
                 f"Classification: {label}",
                 f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
                 "",
-                "Preview:",
+                "Generated output:",
             ]
-            detail_lines.extend((text or label).splitlines()[:6] or [label])
+            result_lines.extend((text or label).splitlines()[:6] or [label])
+            result_lines.extend(["", "Actions:"])
             ch = choose_menu(
-                "Food / Water Scanner Result",
+                "Road Scanner Result",
                 ["Re-run with edits", "Export to JSON", "Save & return", "Cancel"],
                 status=state,
-                footer=detail_lines,
+                header=result_lines,
             )
             ch = str(ch + 1)
             if ch != "1":

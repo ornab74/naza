@@ -46,7 +46,7 @@ if [ -f "$APP_DIR/requirements.txt" ]; then
     pip install -r "$APP_DIR/requirements.txt"
 fi
 
-chmod +x "$APP_DIR/main.py" 2>/dev/null || true
+chmod +x "$APP_DIR/main.py" "$APP_DIR/main_foodwater.py" 2>/dev/null || true
 
 echo
 echo "--------------------------------------------------------------"
@@ -56,4 +56,5 @@ echo "To run it manually:"
 echo "cd \"$APP_DIR\""
 echo "source venv/bin/activate"
 echo "python -u main.py"
+echo "python -u main_foodwater.py"
 echo "--------------------------------------------------------------"

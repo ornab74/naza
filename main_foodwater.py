@@ -42,11 +42,11 @@ def color(text, fg=None, bold=False):
 
 ASCII_ART = {
     "main": [
-        r" _   _    _    ______    _    ",
-        r"| \ | |  / \  |___  /   / \   ",
-        r"|  \| | / _ \    / /   / _ \  ",
-        r"| |\  |/ ___ \  / /   / ___ \ ",
-        "|_| \\_/_/   \\_\\/_/   /_/   \\_\\\\",
+        r". _   _    _    ______    _    ",
+        r".| \ | |  / \  |___  /   / \   ",
+        r".|  \| | / _ \    / /   / _ \  ",
+        r".| |\  |/ ___ \  / /   / ___ \ ",
+        "|_| \\_/_/   \\_/___/_/ / \\_\\\\",
     ],
     "model": [
         r" __  __  ___  ____  _____ _     ",
@@ -197,8 +197,11 @@ def key_name(ch: bytes) -> str:
         return "escape"
     return "other"
 
-def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None) -> List[str]:
+def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]] = None, header: Optional[List[str]] = None) -> List[str]:
     lines = []
+    if header:
+        lines.extend(header)
+        lines.append("")
     for i, opt in enumerate(options):
         prefix = color("›", fg=36, bold=True) if i == selected_idx else " "
         lines.append(f"{prefix} {i+1}) {opt}")
@@ -207,11 +210,11 @@ def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]
         lines.extend(footer)
     return lines
 
-def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0) -> int:
+def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0, header: Optional[List[str]] = None) -> int:
     idx = max(0, min(default_idx, len(options) - 1))
     flush_stdin_buffer()
     while True:
-        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer))
+        render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer, header))
         ch = getch()
         name = key_name(ch)
         if name == "up":
@@ -612,23 +615,19 @@ f"[tuning]\n"
 f"Scene details:\n"
 f"Location: {data.get('location','unspecified location')}\n"
 f"Food or Water Type: {data.get('road_type','unknown')}\n"
-f"Condition: {data.get('weather','unknown')}\n"
-f"Temp: {data.get('traffic','unknown')}\n"
-f"Cooked, Frozen Or Uncooked: {data.get('obstacles','none')}\n"
-f"Sensor notes: {data.get('sensor_notes','none')}\n"
 f"{metrics_line}\n"
 f"Quantum data: {entropy_text}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
 f"- Think through all scene factors internally but do not show reasoning.\n"
-f"- Evaluate surface, simulated use, currenr state, temp, and condition holistically.\n"
+f"- Evaluate the available location and food or water type holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
 f"- The valid outputs are only: Low, Medium, High.\n\n"
 f"[action]\n"
-f"1) Normalize sensor inputs to comparable scales.\n"
-f"3) Map environmental risk cues -> discrete label using conservative thresholds.\n"
+f"1) Normalize available inputs to comparable scales.\n"
+f"3) Map food or water risk cues -> discrete label using conservative thresholds.\n"
 f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
 f"5) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
 f"6) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
@@ -775,15 +774,11 @@ async def road_scanner_flow(state:dict):
         "scan",
         "Food / Water Scanner",
         "Capture food or water conditions and classify risk.",
-        "Step 1/6",
+        "Inputs",
         ["Leave blank to accept defaults.", "The final report screen now stays open until you choose an action."],
     )
-    data['location'] = input("Location (e.g., whole foods'): ").strip() or "unspecified location"
-    data['road_type'] = input("food or water type: ").strip() or "highway"
-    data['weather'] = input("Condition ").strip() or "clear"
-    data['traffic'] = input("Temperture ").strip() or "low"
-    data['obstacles'] = input("Cooked Frozen Or uncooked ").strip() or "none"
-    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
+    data['location'] = input("Location (e.g., Whole Foods): ").strip() or "unspecified location"
+    data['road_type'] = input("Food or water type: ").strip() or "unspecified food or water"
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
@@ -825,18 +820,19 @@ async def road_scanner_flow(state:dict):
             elif "high" in lowered: label = "High"
             else: label = "Medium"
         while True:
-            detail_lines = [
+            result_lines = [
                 f"Classification: {label}",
                 f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
                 "",
-                "Preview:",
+                "Generated output:",
             ]
-            detail_lines.extend((text or label).splitlines()[:6] or [label])
+            result_lines.extend((text or label).splitlines()[:6] or [label])
+            result_lines.extend(["", "Actions:"])
             ch = choose_menu(
                 "Food / Water Scanner Result",
                 ["Re-run with edits", "Export to JSON", "Save & return", "Cancel"],
                 status=state,
-                footer=detail_lines,
+                header=result_lines,
             )
             ch = str(ch + 1)
             if ch != "1":
@@ -997,7 +993,7 @@ def main_menu_loop(state:dict):
         choice = options[idx]
         if choice == "Model Manager": model_manager(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
-        elif choice == "Road Scanner": asyncio.run(road_scanner_flow(state))
+        elif choice == "Food Water Scanner": asyncio.run(road_scanner_flow(state))
         elif choice == "View chat history": asyncio.run(db_viewer_flow(state))
         elif choice == "Rekey / Rotate key": rekey_flow(state)
         elif choice == "Exit": print("Goodbye."); return
