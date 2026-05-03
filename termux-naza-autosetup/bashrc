@@ -1,0 +1,41 @@
+choose_naza_app() {
+    echo ""
+    echo "Choose SecureLLM app:"
+    echo "  1) Road Scanner (main.py)"
+    echo "  2) Food / Water Scanner (main_foodwater.py)"
+    read -r -p "Selection [1]: " NAZA_APP_CHOICE
+
+    case "$NAZA_APP_CHOICE" in
+        2|food|foodwater|main_foodwater.py)
+            NAZA_APP_FILE="main_foodwater.py"
+            ;;
+        *)
+            NAZA_APP_FILE="main.py"
+            ;;
+    esac
+}
+
+run_naza_app() {
+    choose_naza_app
+
+    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
+        cd /home/sudouser/naza || exit 1
+        source venv/bin/activate || exit 1
+        export TERM=xterm-256color
+        export LANG=C.UTF-8
+        export PYTHONUNBUFFERED=1
+        clear
+        exec python -u '$NAZA_APP_FILE'
+    "
+}
+
+if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
+    export NAZA_STARTED=1
+    run_naza_app
+    clear
+    echo "Returned to Termux."
+fi
+
+naza() {
+    run_naza_app
+}
