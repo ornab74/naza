@@ -1,8 +1,9 @@
 # === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
+
 choose_naza_app() {
     echo ""
     echo "Choose SecureLLM app:"
-    echo "  1) Road Scanner        (main.py)"
+    echo "  1) Road Scanner         (main.py)"
     echo "  2) Food / Water Scanner (main_foodwater.py)"
     echo ""
     read -r -p "Selection [1]: " NAZA_APP_CHOICE
@@ -26,9 +27,8 @@ run_naza_app() {
     echo "Launching $NAZA_APP_NAME ($NAZA_APP_FILE)..."
     echo ""
 
-    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -c "
+    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -lc "
         cd /home/sudouser/naza || exit 1
-
         source venv/bin/activate || exit 1
 
         export TERM=xterm-256color
@@ -36,15 +36,30 @@ run_naza_app() {
         export PYTHONUNBUFFERED=1
 
         clear
-        if [ ! -f '$NAZA_APP_FILE' ]; then
-            echo 'Missing selected app file: $NAZA_APP_FILE'
+
+        if [ ! -f \"$NAZA_APP_FILE\" ]; then
+            echo \"Missing selected app file: $NAZA_APP_FILE\"
+            echo ''
+            echo 'Files in /home/sudouser/naza:'
+            ls -la
+            echo ''
+            echo 'Press Enter to return to Termux...'
+            read -r
             exit 1
         fi
-        echo 'Starting $NAZA_APP_FILE in venv...'
-        exec python -u '$NAZA_APP_FILE'
+
+        echo \"Starting $NAZA_APP_FILE in venv...\"
+        echo ''
+
+        python -u \"$NAZA_APP_FILE\"
+
+        echo ''
+        echo 'App exited. Press Enter to return to Termux...'
+        read -r
     "
 }
 
+# Auto-launch only from normal Termux home shell
 if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
     export NAZA_STARTED=1
 
