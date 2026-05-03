@@ -1,5 +1,8 @@
 # === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
 
+NAZA_DIR="/home/sudouser/naza"
+NAZA_VENV="$NAZA_DIR/venv"
+
 choose_naza_app() {
     echo ""
     echo "Choose SecureLLM app:"
@@ -28,38 +31,46 @@ run_naza_app() {
     echo ""
 
     proot-distro login ubuntu --user sudouser --shared-tmp -- bash -lc "
-        cd /home/sudouser/naza || exit 1
-        source venv/bin/activate || exit 1
+        cd '$NAZA_DIR' || exit 1
 
+        if [ ! -f '$NAZA_VENV/bin/activate' ]; then
+            echo 'Missing venv activate file: $NAZA_VENV/bin/activate'
+            read -r -p 'Press Enter to return to Termux...'
+            exit 1
+        fi
+
+        source '$NAZA_VENV/bin/activate' || exit 1
+
+        export VIRTUAL_ENV='$NAZA_VENV'
+        export PATH='$NAZA_VENV/bin:\$PATH'
         export TERM=xterm-256color
         export LANG=C.UTF-8
         export PYTHONUNBUFFERED=1
 
         clear
 
-        if [ ! -f \"$NAZA_APP_FILE\" ]; then
-            echo \"Missing selected app file: $NAZA_APP_FILE\"
-            echo ''
-            echo 'Files in /home/sudouser/naza:'
+        echo 'Using venv:'
+        echo \"  VIRTUAL_ENV=\$VIRTUAL_ENV\"
+        echo \"  python=\$(which python)\"
+        echo ''
+
+        if [ ! -f '$NAZA_APP_FILE' ]; then
+            echo 'Missing selected app file: $NAZA_APP_FILE'
             ls -la
-            echo ''
-            echo 'Press Enter to return to Termux...'
-            read -r
+            read -r -p 'Press Enter to return to Termux...'
             exit 1
         fi
 
-        echo \"Starting $NAZA_APP_FILE in venv...\"
+        echo 'Starting $NAZA_APP_FILE in venv...'
         echo ''
 
-        python -u \"$NAZA_APP_FILE\"
-
-        echo ''
-        echo 'App exited. Press Enter to return to Termux...'
-        read -r
+        exec '$NAZA_VENV/bin/python' -u '$NAZA_APP_FILE'
     "
+
+    echo ""
+    echo "Returned to Termux."
 }
 
-# Auto-launch only from normal Termux home shell
 if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
     export NAZA_STARTED=1
 
@@ -72,12 +83,8 @@ if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -
     echo ""
 
     run_naza_app
-
-    clear
-    echo "Returned to Termux."
 fi
 
-# Manual SecureLLM launcher with app selection
 naza() {
     run_naza_app
 }
