@@ -1,4 +1,4 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, base64, importlib.util, hmac
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, base64, importlib.util, hmac, sqlite3
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
@@ -66,6 +66,12 @@ DEFENSE_PROFILE_PRESETS = {
     "hardened": {"metric_samples": 7, "max_defense_passes": 5, "noise_width": 2, "jitter_scale": 1.2, "defense_voting": True, "colorwheel_spins": 96, "colorwheel_rings": 12, "ml_trace_scramble": True},
     "maximum": {"metric_samples": 9, "max_defense_passes": 5, "noise_width": 3, "jitter_scale": 1.6, "defense_voting": True, "colorwheel_spins": 144, "colorwheel_rings": 16, "ml_trace_scramble": True},
 }
+_APP_KEY: Optional[bytes] = None
+_DB_SETTINGS_ACTIVE = False
+_SECURITY_SETTINGS_CACHE: Optional[dict] = None
+_SELECTED_MODEL_ID_CACHE: Optional[str] = None
+_MODEL_SELECTION_MODE_CACHE: Optional[str] = None
+_COLORWHEEL_STATE_CACHE: Optional[dict] = None
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 def constant_time_compare(left, right) -> bool:
@@ -90,23 +96,57 @@ def model_label(profile: dict) -> str:
     runtime = MODEL_RUNTIME_NAMES.get(profile.get("runtime"), profile.get("runtime", "unknown"))
     return f"{profile['name']} [{runtime}]"
 
-def read_selected_model_profile() -> dict:
+def set_app_key(key: bytes) -> None:
+    global _APP_KEY
+    _APP_KEY = key
+
+def _normalize_model_selection_mode(mode: Optional[str]) -> str:
+    return "entropy" if str(mode or "entropy").strip().lower() == "entropy" else "fixed"
+
+def _initial_colorwheel_state() -> dict:
+    return {"digest": hashlib.sha3_256(os.urandom(32)).hexdigest(), "tick": 0, "wheel_index": 0}
+
+def _read_selected_model_id_file() -> str:
     if SELECTED_MODEL_PATH.exists():
-        return model_by_id(SELECTED_MODEL_PATH.read_text().strip())
-    return MODEL_PROFILES[0]
+        try:
+            return model_by_id(SELECTED_MODEL_PATH.read_text().strip())["id"]
+        except Exception:
+            pass
+    return MODEL_PROFILES[0]["id"]
 
-def write_selected_model_profile(profile: dict) -> None:
-    SELECTED_MODEL_PATH.write_text(profile["id"] + "\n")
-
-def read_model_selection_mode() -> str:
+def _read_model_selection_mode_file() -> str:
     if MODEL_SELECTION_MODE_PATH.exists():
-        mode = MODEL_SELECTION_MODE_PATH.read_text().strip().lower()
-        if mode in ("fixed", "entropy"):
-            return mode
+        try:
+            return _normalize_model_selection_mode(MODEL_SELECTION_MODE_PATH.read_text())
+        except Exception:
+            pass
     return "entropy"
 
-def write_model_selection_mode(mode: str) -> None:
-    MODEL_SELECTION_MODE_PATH.write_text(("entropy" if mode == "entropy" else "fixed") + "\n")
+def _read_security_settings_file() -> dict:
+    if SECURITY_SETTINGS_PATH.exists():
+        try:
+            return normalize_security_settings(json.loads(SECURITY_SETTINGS_PATH.read_text()))
+        except Exception:
+            pass
+    return normalize_security_settings()
+
+def _read_colorwheel_state_file() -> dict:
+    if COLORWHEEL_STATE_PATH.exists():
+        try:
+            payload = json.loads(COLORWHEEL_STATE_PATH.read_text())
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    return _initial_colorwheel_state()
+
+def _legacy_settings_payload() -> Dict[str, object]:
+    return {
+        "security_settings": _read_security_settings_file(),
+        "selected_model_id": _read_selected_model_id_file(),
+        "model_selection_mode": _read_model_selection_mode_file(),
+        "colorwheel_state": _read_colorwheel_state_file(),
+    }
 
 def normalize_security_settings(raw: Optional[dict] = None) -> dict:
     settings = dict(DEFAULT_SECURITY_SETTINGS)
@@ -130,16 +170,111 @@ def normalize_security_settings(raw: Optional[dict] = None) -> dict:
     settings["ml_trace_scramble"] = bool(settings.get("ml_trace_scramble", True))
     return settings
 
+def _ensure_settings_schema_sync(conn) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+
+def _decode_setting_value(raw: str):
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
+
+def _apply_settings_rows(rows: Dict[str, str]) -> None:
+    global _SECURITY_SETTINGS_CACHE, _SELECTED_MODEL_ID_CACHE, _MODEL_SELECTION_MODE_CACHE, _COLORWHEEL_STATE_CACHE
+    legacy = _legacy_settings_payload()
+    security = _decode_setting_value(rows["security_settings"]) if "security_settings" in rows else legacy["security_settings"]
+    selected_id = _decode_setting_value(rows["selected_model_id"]) if "selected_model_id" in rows else legacy["selected_model_id"]
+    mode = _decode_setting_value(rows["model_selection_mode"]) if "model_selection_mode" in rows else legacy["model_selection_mode"]
+    colorwheel = _decode_setting_value(rows["colorwheel_state"]) if "colorwheel_state" in rows else legacy["colorwheel_state"]
+    _SECURITY_SETTINGS_CACHE = normalize_security_settings(security if isinstance(security, dict) else None)
+    _SELECTED_MODEL_ID_CACHE = model_by_id(str(selected_id))["id"]
+    _MODEL_SELECTION_MODE_CACHE = _normalize_model_selection_mode(str(mode))
+    _COLORWHEEL_STATE_CACHE = colorwheel if isinstance(colorwheel, dict) else _initial_colorwheel_state()
+
+def _decrypt_db_to_path(key: bytes, dest: Path) -> None:
+    global _DB_SETTINGS_ACTIVE
+    _DB_SETTINGS_ACTIVE = True
+    try:
+        if DB_PATH.exists():
+            dest.write_bytes(aes_decrypt(DB_PATH.read_bytes(), key))
+    finally:
+        _DB_SETTINGS_ACTIVE = False
+
+def _encrypt_db_from_path(key: bytes, src: Path) -> None:
+    global _DB_SETTINGS_ACTIVE
+    _DB_SETTINGS_ACTIVE = True
+    try:
+        DB_PATH.write_bytes(aes_encrypt(src.read_bytes(), key))
+    finally:
+        _DB_SETTINGS_ACTIVE = False
+
+def _load_settings_from_encrypted_db(key: bytes) -> bool:
+    if not DB_PATH.exists():
+        return False
+    dec = allocate_temp_db_path()
+    try:
+        _decrypt_db_to_path(key, dec)
+        with sqlite3.connect(dec) as conn:
+            try:
+                rows = dict(conn.execute("SELECT key, value FROM app_settings").fetchall())
+            except sqlite3.OperationalError:
+                return False
+        _apply_settings_rows(rows)
+        return True
+    except Exception:
+        return False
+    finally:
+        safe_cleanup([dec])
+
+def _write_settings_to_encrypted_db(updates: Dict[str, object]) -> None:
+    if _APP_KEY is None:
+        return
+    dec = allocate_temp_db_path()
+    try:
+        _decrypt_db_to_path(_APP_KEY, dec)
+        with sqlite3.connect(dec) as conn:
+            _ensure_settings_schema_sync(conn)
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            for key, value in updates.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (key, json.dumps(value, sort_keys=True), now),
+                )
+            conn.commit()
+        _encrypt_db_from_path(_APP_KEY, dec)
+    finally:
+        safe_cleanup([dec])
+
+def read_selected_model_profile() -> dict:
+    if _SELECTED_MODEL_ID_CACHE is None and _APP_KEY is not None and not _DB_SETTINGS_ACTIVE:
+        _load_settings_from_encrypted_db(_APP_KEY)
+    return model_by_id(_SELECTED_MODEL_ID_CACHE or _read_selected_model_id_file())
+
+def write_selected_model_profile(profile: dict) -> None:
+    global _SELECTED_MODEL_ID_CACHE
+    _SELECTED_MODEL_ID_CACHE = model_by_id(profile["id"])["id"]
+    _write_settings_to_encrypted_db({"selected_model_id": _SELECTED_MODEL_ID_CACHE})
+
+def read_model_selection_mode() -> str:
+    if _MODEL_SELECTION_MODE_CACHE is None and _APP_KEY is not None and not _DB_SETTINGS_ACTIVE:
+        _load_settings_from_encrypted_db(_APP_KEY)
+    return _MODEL_SELECTION_MODE_CACHE or _read_model_selection_mode_file()
+
+def write_model_selection_mode(mode: str) -> None:
+    global _MODEL_SELECTION_MODE_CACHE
+    _MODEL_SELECTION_MODE_CACHE = _normalize_model_selection_mode(mode)
+    _write_settings_to_encrypted_db({"model_selection_mode": _MODEL_SELECTION_MODE_CACHE})
+
 def read_security_settings() -> dict:
-    if SECURITY_SETTINGS_PATH.exists():
-        try:
-            return normalize_security_settings(json.loads(SECURITY_SETTINGS_PATH.read_text()))
-        except Exception:
-            pass
-    return normalize_security_settings()
+    if _SECURITY_SETTINGS_CACHE is None and _APP_KEY is not None and not _DB_SETTINGS_ACTIVE:
+        _load_settings_from_encrypted_db(_APP_KEY)
+    return normalize_security_settings(_SECURITY_SETTINGS_CACHE or _read_security_settings_file())
 
 def write_security_settings(settings: dict) -> None:
-    SECURITY_SETTINGS_PATH.write_text(json.dumps(normalize_security_settings(settings), indent=2) + "\n")
+    global _SECURITY_SETTINGS_CACHE
+    _SECURITY_SETTINGS_CACHE = normalize_security_settings(settings)
+    _write_settings_to_encrypted_db({"security_settings": _SECURITY_SETTINGS_CACHE})
 
 def is_model_enabled(profile: dict, settings: Optional[dict] = None) -> bool:
     settings = settings or read_security_settings()
@@ -171,21 +306,14 @@ def _ansi_rgb(text: str, rgb: Tuple[int, int, int]) -> str:
     return f"\x1b[38;2;{r};{g};{b}m{text}\x1b[0m"
 
 def read_colorwheel_state() -> dict:
-    if COLORWHEEL_STATE_PATH.exists():
-        try:
-            payload = json.loads(COLORWHEEL_STATE_PATH.read_text())
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
-    return {"digest": hashlib.sha3_256(os.urandom(32)).hexdigest(), "tick": 0, "wheel_index": 0}
+    if _COLORWHEEL_STATE_CACHE is None and _APP_KEY is not None and not _DB_SETTINGS_ACTIVE:
+        _load_settings_from_encrypted_db(_APP_KEY)
+    return dict(_COLORWHEEL_STATE_CACHE or _read_colorwheel_state_file())
 
 def write_colorwheel_state(state: dict) -> None:
-    try:
-        COLORWHEEL_STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
-        COLORWHEEL_STATE_PATH.chmod(0o600)
-    except Exception:
-        pass
+    global _COLORWHEEL_STATE_CACHE
+    _COLORWHEEL_STATE_CACHE = dict(state)
+    _write_settings_to_encrypted_db({"colorwheel_state": _COLORWHEEL_STATE_CACHE})
 
 def colorwheel_entropy_state(purpose: str, context: Optional[dict] = None, spins: Optional[int] = None, persist: bool = True) -> dict:
     settings = read_security_settings()
@@ -1057,17 +1185,25 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
         raise
 
 async def init_db(key: bytes):
-    if not DB_PATH.exists():
-        temp_path = allocate_temp_db_path()
-        async with aiosqlite.connect(temp_path) as db:
-            await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
-            await db.commit()
-        try:
-            with temp_path.open("rb") as f:
-                enc = aes_encrypt(f.read(), key)
-            DB_PATH.write_bytes(enc)
-        finally:
-            safe_cleanup([temp_path])
+    set_app_key(key)
+    temp_path = allocate_temp_db_path()
+    try:
+        _decrypt_db_to_path(key, temp_path)
+        with sqlite3.connect(temp_path) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            for setting_key, setting_value in _legacy_settings_payload().items():
+                db.execute(
+                    "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    (setting_key, json.dumps(setting_value, sort_keys=True), now),
+                )
+            db.commit()
+            rows = dict(db.execute("SELECT key, value FROM app_settings").fetchall())
+        _apply_settings_rows(rows)
+        _encrypt_db_from_path(key, temp_path)
+    finally:
+        safe_cleanup([temp_path])
 
 async def log_interaction(prompt: str, response: str, key: bytes):
     dec = allocate_temp_db_path()
@@ -2185,6 +2321,11 @@ def rekey_flow(state:dict):
     finally:
         safe_cleanup([tmp_model,tmp_db])
         state['key'] = KEY_PATH.read_bytes()[16:48] if KEY_PATH.exists() and len(KEY_PATH.read_bytes())>=48 else KEY_PATH.read_bytes()[:32]
+        set_app_key(state['key'])
+        _load_settings_from_encrypted_db(state['key'])
+        state["security_settings"] = read_security_settings()
+        state["selected_model"] = read_selected_model_profile()
+        state["model_selection_mode"] = read_model_selection_mode()
         print("Rekey attempt finished. Verify files manually."); input("Enter...")
 
 def safe_cleanup(paths:List[Path]):
@@ -2240,15 +2381,17 @@ def main_menu_loop(state:dict):
 def main():
     try: key = ensure_key_interactive()
     except Exception: key = get_or_create_key()
+    set_app_key(key)
+    try:
+        asyncio.run(init_db(key))
+    except Exception:
+        pass
     settings = read_security_settings()
     selected = read_selected_model_profile()
     if not is_model_enabled(selected, settings):
         selected = first_enabled_model_profile(settings)
         write_selected_model_profile(selected)
     state = {"key": key, "model_loaded": False, "selected_model": selected, "model_selection_mode": read_model_selection_mode(), "security_settings": settings}
-    try:
-        asyncio.run(init_db(state['key']))
-    except Exception: pass
     try:
         main_menu_loop(state)
     except KeyboardInterrupt:
