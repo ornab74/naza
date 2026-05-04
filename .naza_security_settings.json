@@ -1,0 +1,13 @@
+{
+  "disabled_model_ids": [],
+  "defense_profile": "maximum",
+  "defense_voting": false,
+  "metric_samples": 9,
+  "max_defense_passes": 5,
+  "noise_width": 3,
+  "jitter_scale": 1.6,
+  "colorwheel_enabled": true,
+  "colorwheel_spins": 144,
+  "colorwheel_rings": 16,
+  "ml_trace_scramble": true
+}

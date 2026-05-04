@@ -316,6 +316,9 @@ jinja2==3.1.6 \
 llama-cpp-python==0.3.1 \
     --hash=sha256:75ec8374960b6353c254e55a48e7c7783abf6bcb9178ba0f655490738e5a9004
     # via -r requirements.in
+liboqs-python==0.14.1 \
+    --hash=sha256:e3c81e632d02122dda3734edc4ba83bd457eefa3fdb266d33ea908a77a17642f
+    # via -r requirements.in
 markupsafe==3.0.3 \
     --hash=sha256:0303439a41979d9e74d18ff5e2dd8c43ed6c6001fd40e5bf2e43f7bd9bbc523f \
     --hash=sha256:068f375c472b3e7acbe2d5318dea141359e6900156b5b2ba06a30b169086b91a \

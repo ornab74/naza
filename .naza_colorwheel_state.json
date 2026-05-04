@@ -1,0 +1,15 @@
+{
+  "digest": "8254b36e28d9940047e6effd908afa485907284add2bfac6618dad79128d3462",
+  "tick": 29,
+  "wheel_index": 15,
+  "angle_deg": 337.5,
+  "rgb": [
+    78,
+    253,
+    49
+  ],
+  "rings": 16,
+  "spins": 144,
+  "trace_digest": "aed986ef777ae0826f409428",
+  "updated_at": "2026-05-04 02:48:06"
+}

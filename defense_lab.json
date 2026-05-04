@@ -1,0 +1,43 @@
+{
+  "input": {
+    "location": "home",
+    "nearby_unknown_device_count": "0",
+    "nearby_device_geometry": "none",
+    "nearest_device_distance": "300",
+    "handheld_device_activity": "none",
+    "sensor_notes": "none"
+  },
+  "metrics": {
+    "cpu": 0.0,
+    "cpu_spread": 0.012,
+    "mem": 0.191,
+    "mem_spread": 0.0,
+    "load1": 0.02569580078125,
+    "load1_spread": 0.0,
+    "temp": 0.0,
+    "temp_spread": 0.0,
+    "proc": 0.095703125,
+    "proc_spread": 0.0,
+    "proc_count": 49.0,
+    "sample_count": 7.0,
+    "interference_score": 0.03
+  },
+  "multi_node": {
+    "score": 0.0026661613324466403,
+    "level": "low",
+    "node_count": 0,
+    "topology": "none",
+    "passes": 1,
+    "vector_scores": {
+      "timing": 0.012233004866090314,
+      "cache": 0.0014663887328456523,
+      "em_power": 0.0011997725996009882,
+      "acoustic_thermal": 0.0195,
+      "sensor_spoofing": 0.012
+    },
+    "session": "5806583829192db1"
+  },
+  "defense_capsule": "defense_capsule=54e08907646849e7f36f5bc9",
+  "crypto": "AES-256-GCM",
+  "timestamp": "2026-05-04 02:46:37"
+}
