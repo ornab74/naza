@@ -1,0 +1,90 @@
+# === AUTO-START SECURELLM IN UBUNTU PROOT (naza folder + venv) ===
+
+NAZA_DIR="/home/sudouser/naza"
+NAZA_VENV="$NAZA_DIR/venv"
+
+choose_naza_app() {
+    echo ""
+    echo "Choose SecureLLM app:"
+    echo "  1) Road Scanner         (main.py)"
+    echo "  2) Food / Water Scanner (main_foodwater.py)"
+    echo ""
+    read -r -p "Selection [1]: " NAZA_APP_CHOICE
+
+    case "$NAZA_APP_CHOICE" in
+        2|food|foodwater|food-water|main_foodwater.py)
+            NAZA_APP_FILE="main_foodwater.py"
+            NAZA_APP_NAME="Food / Water Scanner"
+            ;;
+        *)
+            NAZA_APP_FILE="main.py"
+            NAZA_APP_NAME="Road Scanner"
+            ;;
+    esac
+}
+
+run_naza_app() {
+    choose_naza_app
+
+    echo ""
+    echo "Launching $NAZA_APP_NAME ($NAZA_APP_FILE)..."
+    echo ""
+
+    proot-distro login ubuntu --user sudouser --shared-tmp -- bash -lc "
+        cd '$NAZA_DIR' || exit 1
+
+        if [ ! -f '$NAZA_VENV/bin/activate' ]; then
+            echo 'Missing venv activate file: $NAZA_VENV/bin/activate'
+            read -r -p 'Press Enter to return to Termux...'
+            exit 1
+        fi
+
+        source '$NAZA_VENV/bin/activate' || exit 1
+
+        export VIRTUAL_ENV='$NAZA_VENV'
+        export PATH='$NAZA_VENV/bin:\$PATH'
+        export TERM=xterm-256color
+        export LANG=C.UTF-8
+        export PYTHONUNBUFFERED=1
+
+        clear
+
+        echo 'Using venv:'
+        echo \"  VIRTUAL_ENV=\$VIRTUAL_ENV\"
+        echo \"  python=\$(which python)\"
+        echo ''
+
+        if [ ! -f '$NAZA_APP_FILE' ]; then
+            echo 'Missing selected app file: $NAZA_APP_FILE'
+            ls -la
+            read -r -p 'Press Enter to return to Termux...'
+            exit 1
+        fi
+
+        echo 'Starting $NAZA_APP_FILE in venv...'
+        echo ''
+
+        exec '$NAZA_VENV/bin/python' -u '$NAZA_APP_FILE'
+    "
+
+    echo ""
+    echo "Returned to Termux."
+}
+
+if [ -z "$NAZA_STARTED" ] && [ "$PWD" = "$HOME" ] && [ -z "$SSH_CLIENT" ] && [ -z "$TMUX" ]; then
+    export NAZA_STARTED=1
+
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║          Starting SecureLLM TUI (choose app)             ║"
+    echo "║        Ubuntu proot → /home/sudouser/naza                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo "   Type 'exit' twice to return to Termux"
+    echo ""
+
+    run_naza_app
+fi
+
+naza() {
+    run_naza_app
+}
