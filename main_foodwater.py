@@ -1,10 +1,11 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, base64, importlib.util, hmac
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from llama_cpp import Llama
 
 try:
@@ -25,8 +26,279 @@ MODEL_PATH = MODELS_DIR / MODEL_FILE
 ENCRYPTED_MODEL = MODEL_PATH.with_suffix(MODEL_PATH.suffix + ".aes")
 DB_PATH = Path("chat_history.db.aes")
 KEY_PATH = Path(".enc_key")
+SELECTED_MODEL_PATH = Path(".selected_model")
+MODEL_SELECTION_MODE_PATH = Path(".model_selection_mode")
+SECURITY_SETTINGS_PATH = Path(".naza_security_settings.json")
+COLORWHEEL_STATE_PATH = Path(".naza_colorwheel_state.json")
+OQS_KEYPAIR_PATH = Path(".oqs_mlkem_keypair.json")
+OQS_KEM_ALGORITHM = os.environ.get("NAZA_OQS_KEM", "ML-KEM-768")
+OQS_MAGIC = b"NAZA-OQS-HYBRID-v1\n"
+OQS_AAD_PREFIX = b"naza-oqs-hybrid-v1:"
+SCANNER_METRIC_SAMPLES = 5
 EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
+MODEL_PROFILES = [
+    {"id": "llama3-small", "name": "Llama 3 Small GGUF", "repo": MODEL_REPO, "file": MODEL_FILE, "expected_hash": EXPECTED_HASH, "runtime": "llama_cpp"},
+    {"id": "gemma4-e2b-litert", "name": "Gemma 4 E2B LiteRT-LM", "repo": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/", "file": "gemma-4-E2B-it.litertlm", "expected_hash": "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42", "runtime": "litert_lm"},
+    {"id": "llama32-1b-q2", "name": "Llama 3.2 1B Q2_K GGUF", "repo": "https://huggingface.co/tensorblock/Llama-3.2-1B-GGUF/resolve/main/", "file": "Llama-3.2-1B-Q2_K.gguf", "expected_hash": "4befa51035fc4f08a12a04a2e836d06f76602ed46ffb980e85e955f597c6da6c", "runtime": "llama_cpp"},
+]
+MODEL_RUNTIME_NAMES = {"llama_cpp": "llama.cpp", "litert_lm": "LiteRT-LM"}
+DEFAULT_SECURITY_SETTINGS = {
+    "disabled_model_ids": [],
+    "defense_profile": "hardened",
+    "defense_voting": True,
+    "metric_samples": 7,
+    "max_defense_passes": 5,
+    "noise_width": 2,
+    "jitter_scale": 1.2,
+    "colorwheel_enabled": True,
+    "colorwheel_spins": 96,
+    "colorwheel_rings": 12,
+    "ml_trace_scramble": True,
+}
+DEFENSE_PROFILE_PRESETS = {
+    "standard": {"metric_samples": 5, "max_defense_passes": 3, "noise_width": 1, "jitter_scale": 0.8, "defense_voting": True, "colorwheel_spins": 48, "colorwheel_rings": 8, "ml_trace_scramble": True},
+    "hardened": {"metric_samples": 7, "max_defense_passes": 5, "noise_width": 2, "jitter_scale": 1.2, "defense_voting": True, "colorwheel_spins": 96, "colorwheel_rings": 12, "ml_trace_scramble": True},
+    "maximum": {"metric_samples": 9, "max_defense_passes": 5, "noise_width": 3, "jitter_scale": 1.6, "defense_voting": True, "colorwheel_spins": 144, "colorwheel_rings": 16, "ml_trace_scramble": True},
+}
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+def constant_time_compare(left, right) -> bool:
+    left_b = left if isinstance(left, bytes) else str(left).encode("utf-8", errors="ignore")
+    right_b = right if isinstance(right, bytes) else str(right).encode("utf-8", errors="ignore")
+    return hmac.compare_digest(left_b, right_b)
+
+def model_by_id(model_id: str) -> dict:
+    for profile in MODEL_PROFILES:
+        if constant_time_compare(profile["id"], model_id):
+            return profile
+    return MODEL_PROFILES[0]
+
+def model_path_for(profile: dict) -> Path:
+    return MODELS_DIR / profile["file"]
+
+def encrypted_model_path_for(profile: dict) -> Path:
+    path = model_path_for(profile)
+    return path.with_suffix(path.suffix + ".aes")
+
+def model_label(profile: dict) -> str:
+    runtime = MODEL_RUNTIME_NAMES.get(profile.get("runtime"), profile.get("runtime", "unknown"))
+    return f"{profile['name']} [{runtime}]"
+
+def read_selected_model_profile() -> dict:
+    if SELECTED_MODEL_PATH.exists():
+        return model_by_id(SELECTED_MODEL_PATH.read_text().strip())
+    return MODEL_PROFILES[0]
+
+def write_selected_model_profile(profile: dict) -> None:
+    SELECTED_MODEL_PATH.write_text(profile["id"] + "\n")
+
+def read_model_selection_mode() -> str:
+    if MODEL_SELECTION_MODE_PATH.exists():
+        mode = MODEL_SELECTION_MODE_PATH.read_text().strip().lower()
+        if mode in ("fixed", "entropy"):
+            return mode
+    return "entropy"
+
+def write_model_selection_mode(mode: str) -> None:
+    MODEL_SELECTION_MODE_PATH.write_text(("entropy" if mode == "entropy" else "fixed") + "\n")
+
+def normalize_security_settings(raw: Optional[dict] = None) -> dict:
+    settings = dict(DEFAULT_SECURITY_SETTINGS)
+    if isinstance(raw, dict):
+        settings.update(raw)
+    valid_ids = {profile["id"] for profile in MODEL_PROFILES}
+    disabled = [model_id for model_id in settings.get("disabled_model_ids", []) if model_id in valid_ids]
+    if len(disabled) >= len(MODEL_PROFILES):
+        disabled = disabled[:-1]
+    settings["disabled_model_ids"] = disabled
+    profile_name = str(settings.get("defense_profile", "hardened")).lower()
+    settings["defense_profile"] = profile_name if profile_name in DEFENSE_PROFILE_PRESETS else "hardened"
+    settings["defense_voting"] = bool(settings.get("defense_voting", True))
+    settings["metric_samples"] = max(3, min(13, int(settings.get("metric_samples", 7))))
+    settings["max_defense_passes"] = max(1, min(5, int(settings.get("max_defense_passes", 5))))
+    settings["noise_width"] = max(1, min(4, int(settings.get("noise_width", 2))))
+    settings["jitter_scale"] = max(0.5, min(2.0, float(settings.get("jitter_scale", 1.2))))
+    settings["colorwheel_enabled"] = bool(settings.get("colorwheel_enabled", True))
+    settings["colorwheel_spins"] = max(16, min(256, int(settings.get("colorwheel_spins", 96))))
+    settings["colorwheel_rings"] = max(6, min(24, int(settings.get("colorwheel_rings", 12))))
+    settings["ml_trace_scramble"] = bool(settings.get("ml_trace_scramble", True))
+    return settings
+
+def read_security_settings() -> dict:
+    if SECURITY_SETTINGS_PATH.exists():
+        try:
+            return normalize_security_settings(json.loads(SECURITY_SETTINGS_PATH.read_text()))
+        except Exception:
+            pass
+    return normalize_security_settings()
+
+def write_security_settings(settings: dict) -> None:
+    SECURITY_SETTINGS_PATH.write_text(json.dumps(normalize_security_settings(settings), indent=2) + "\n")
+
+def is_model_enabled(profile: dict, settings: Optional[dict] = None) -> bool:
+    settings = settings or read_security_settings()
+    return profile["id"] not in settings.get("disabled_model_ids", [])
+
+def enabled_model_profiles(settings: Optional[dict] = None) -> List[dict]:
+    settings = settings or read_security_settings()
+    enabled = [profile for profile in MODEL_PROFILES if is_model_enabled(profile, settings)]
+    return enabled or [MODEL_PROFILES[0]]
+
+def first_enabled_model_profile(settings: Optional[dict] = None) -> dict:
+    return enabled_model_profiles(settings)[0]
+
+def encrypted_model_profiles(include_disabled: bool = False) -> List[dict]:
+    settings = read_security_settings()
+    profiles = MODEL_PROFILES if include_disabled else enabled_model_profiles(settings)
+    return [profile for profile in profiles if encrypted_model_path_for(profile).exists()]
+
+def _rgb_from_wheel(index: int, rings: int) -> Tuple[int, int, int]:
+    angle = (index % max(1, rings)) / float(max(1, rings)) * math.tau
+    return (
+        int((math.sin(angle) * 0.5 + 0.5) * 255),
+        int((math.sin(angle + math.tau / 3.0) * 0.5 + 0.5) * 255),
+        int((math.sin(angle + math.tau * 2.0 / 3.0) * 0.5 + 0.5) * 255),
+    )
+
+def _ansi_rgb(text: str, rgb: Tuple[int, int, int]) -> str:
+    r, g, b = rgb
+    return f"\x1b[38;2;{r};{g};{b}m{text}\x1b[0m"
+
+def read_colorwheel_state() -> dict:
+    if COLORWHEEL_STATE_PATH.exists():
+        try:
+            payload = json.loads(COLORWHEEL_STATE_PATH.read_text())
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+    return {"digest": hashlib.sha3_256(os.urandom(32)).hexdigest(), "tick": 0, "wheel_index": 0}
+
+def write_colorwheel_state(state: dict) -> None:
+    try:
+        COLORWHEEL_STATE_PATH.write_text(json.dumps(state, indent=2) + "\n")
+        COLORWHEEL_STATE_PATH.chmod(0o600)
+    except Exception:
+        pass
+
+def colorwheel_entropy_state(purpose: str, context: Optional[dict] = None, spins: Optional[int] = None, persist: bool = True) -> dict:
+    settings = read_security_settings()
+    rings = int(settings.get("colorwheel_rings", 12))
+    spin_count = int(spins or settings.get("colorwheel_spins", 96))
+    previous = read_colorwheel_state()
+    base = {
+        "purpose": purpose,
+        "context": context or {},
+        "previous": previous.get("digest", ""),
+        "tick": previous.get("tick", 0),
+        "pid": os.getpid(),
+        "thread": threading.get_ident(),
+        "time_ns": time.time_ns(),
+        "nonce": base64.b64encode(os.urandom(32)).decode("ascii"),
+    }
+    digest = hashlib.sha3_512(json.dumps(base, sort_keys=True, default=str).encode("utf-8")).digest()
+    trace = []
+    for spin in range(max(1, spin_count)):
+        start = time.perf_counter_ns()
+        rgb = _rgb_from_wheel(digest[spin % len(digest)] + spin + int(previous.get("wheel_index", 0)), rings)
+        timing = time.perf_counter_ns() - start
+        digest = hashlib.blake2b(digest + bytes(rgb) + timing.to_bytes(8, "big", signed=False) + os.urandom(4) + spin.to_bytes(2, "big", signed=False), digest_size=64).digest()
+        if spin % max(1, spin_count // 8) == 0:
+            trace.append({"i": spin, "rgb": rgb, "n": digest[0]})
+    index = int.from_bytes(digest[:4], "big") % rings
+    rgb = _rgb_from_wheel(index, rings)
+    state = {
+        "digest": hashlib.sha3_256(digest).hexdigest(),
+        "tick": int(previous.get("tick", 0)) + 1,
+        "wheel_index": index,
+        "angle_deg": round(360.0 * index / float(rings), 2),
+        "rgb": list(rgb),
+        "rings": rings,
+        "spins": spin_count,
+        "trace_digest": hashlib.blake2s(json.dumps(trace, sort_keys=True).encode("utf-8"), digest_size=12).hexdigest(),
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if persist:
+        write_colorwheel_state(state)
+    return state
+
+def colorwheel_entropy_bytes(purpose: str, context: Optional[dict] = None, length: int = 32) -> bytes:
+    settings = read_security_settings()
+    if not settings.get("colorwheel_enabled", True):
+        return os.urandom(length)
+    state = colorwheel_entropy_state(purpose, context=context, persist=True)
+    material = bytes.fromhex(state["digest"]) + bytes(state["rgb"]) + os.urandom(16)
+    out = b""
+    counter = 0
+    while len(out) < length:
+        out += hashlib.sha3_512(material + counter.to_bytes(4, "big")).digest()
+        counter += 1
+    return out[:length]
+
+def colorwheel_marker(purpose: str, context: Optional[dict] = None) -> str:
+    settings = read_security_settings()
+    if not settings.get("colorwheel_enabled", True):
+        return "colorwheel=disabled"
+    state = colorwheel_entropy_state(purpose, context=context, persist=True)
+    return "colorwheel=index:{idx},angle:{angle},rgb:{rgb},trace:{trace}".format(
+        idx=state["wheel_index"],
+        angle=state["angle_deg"],
+        rgb="-".join(str(v) for v in state["rgb"]),
+        trace=state["trace_digest"],
+    )
+
+def trace_scramble_delay(purpose: str, context: Optional[dict] = None) -> None:
+    settings = read_security_settings()
+    if not settings.get("ml_trace_scramble", True):
+        return
+    seed = colorwheel_entropy_bytes("trace-scramble:" + purpose, context=context, length=16)
+    delay = 0.001 + (int.from_bytes(seed[:2], "big") / 65535.0) * float(settings.get("jitter_scale", 1.0)) * 0.045
+    acc = int.from_bytes(seed[2:10], "big")
+    for idx in range(64 + seed[10] % 192):
+        acc ^= int((math.sin((acc + idx) % 313) + 1.0) * 1000000)
+    time.sleep(delay)
+    if acc == -1:
+        print("", end="")
+
+def render_colorwheel_spinner(label: str = "Colorwheel entropy", frames: int = 18) -> str:
+    settings = read_security_settings()
+    if not settings.get("colorwheel_enabled", True):
+        return "colorwheel=disabled"
+    state = read_colorwheel_state()
+    rings = int(settings.get("colorwheel_rings", 12))
+    glyphs = ["|", "/", "-", "\\"]
+    for frame in range(max(1, frames)):
+        idx = (int(state.get("wheel_index", 0)) + frame) % rings
+        rgb = _rgb_from_wheel(idx, rings)
+        sys.stdout.write("\r" + _ansi_rgb(f"{glyphs[frame % len(glyphs)]} {label} ring={idx:02d}", rgb))
+        sys.stdout.flush()
+        trace_scramble_delay("visible-spinner", {"frame": frame, "ring": idx})
+    marker = colorwheel_marker("visible-spinner-final", {"label": label})
+    sys.stdout.write("\r" + " " * (len(label) + 32) + "\r")
+    sys.stdout.flush()
+    return marker
+
+def entropy_select_model_profile(state: Optional[dict] = None, purpose: str = "scan") -> dict:
+    settings = state.get("security_settings", read_security_settings()) if state else read_security_settings()
+    mode = state.get("model_selection_mode", read_model_selection_mode()) if state else read_model_selection_mode()
+    selected = state.get("selected_model", read_selected_model_profile()) if state else read_selected_model_profile()
+    if not is_model_enabled(selected, settings):
+        selected = first_enabled_model_profile(settings)
+    if mode != "entropy":
+        return selected
+    available = encrypted_model_profiles()
+    if not available:
+        return selected
+    entropy = os.urandom(32) + time.time_ns().to_bytes(8, "big", signed=False) + purpose.encode("utf-8")
+    entropy += colorwheel_entropy_bytes("model-select:" + purpose, {"available": [p["id"] for p in available]}, length=32)
+    if psutil is not None:
+        try:
+            entropy += json.dumps(collect_system_metrics(), sort_keys=True).encode("utf-8")
+        except Exception:
+            pass
+    digest = hashlib.sha256(entropy).digest()
+    return available[int.from_bytes(digest[:8], "big") % len(available)]
+
 
 CSI = "\x1b["
 def clear_screen():
@@ -270,15 +542,229 @@ def read_menu_choice(num_items:int, prompt="Use ↑↓ arrows or number, Enter t
                 if 1 <= n <= num_items:
                     return n-1
 
-def aes_encrypt(data: bytes, key: bytes) -> bytes:
+_OQS_MODULE = None
+_OQS_IMPORT_ERROR = None
+
+def side_channel_noise_jitter(max_ms: int = 25, min_rounds: int = 1, max_rounds: int = 4) -> None:
+    settings = read_security_settings()
+    max_ms = max(1, int(max_ms * float(settings.get("jitter_scale", 1.0))))
+    max_rounds = max(min_rounds, int(max_rounds * float(settings.get("jitter_scale", 1.0))))
+    rounds = min_rounds + int.from_bytes(os.urandom(1), "big") % max(1, max_rounds - min_rounds + 1)
+    acc = 0
+    for _ in range(rounds):
+        block = os.urandom(96)
+        digest = hashlib.sha3_256(block + acc.to_bytes(8, "big", signed=False)).digest()
+        acc ^= int.from_bytes(digest[:8], "big")
+        time.sleep((int.from_bytes(digest[8:10], "big") / 65535.0) * max_ms / 1000.0)
+    if acc == -1:
+        print("", end="")
+
+def start_noise_threads(width: int = 2):
+    stop_event = threading.Event()
+    def noise_worker():
+        acc = 0
+        while not stop_event.is_set():
+            payload = os.urandom(128) + acc.to_bytes(8, "big", signed=False)
+            acc ^= int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+            for i in range(64):
+                acc ^= int((math.sin((acc + i) % 97) + 1.0) * 1000.0)
+            stop_event.wait(0.001 + (acc % 7) / 1000.0)
+    threads = [threading.Thread(target=noise_worker, daemon=True) for _ in range(max(1, width))]
+    for thread in threads:
+        thread.start()
+    return stop_event, threads
+
+def stop_noise_threads(stop_event, threads) -> None:
+    stop_event.set()
+    for thread in threads:
+        thread.join(timeout=0.05)
+
+def run_with_side_channel_noise(fn, *args, **kwargs):
+    settings = read_security_settings()
+    stop_event, threads = start_noise_threads(width=int(settings.get("noise_width", 2)))
+    try:
+        trace_scramble_delay("pre-critical-section", {"fn": getattr(fn, "__name__", "call")})
+        side_channel_noise_jitter(35, 2, 5)
+        return fn(*args, **kwargs)
+    finally:
+        side_channel_noise_jitter(20, 1, 3)
+        trace_scramble_delay("post-critical-section", {"fn": getattr(fn, "__name__", "call")})
+        stop_noise_threads(stop_event, threads)
+
+def oqs_python_available() -> bool:
+    return importlib.util.find_spec("oqs") is not None
+
+def _get_oqs_module():
+    global _OQS_MODULE, _OQS_IMPORT_ERROR
+    if _OQS_MODULE is not None:
+        return _OQS_MODULE
+    if not oqs_python_available():
+        _OQS_IMPORT_ERROR = "liboqs-python is not installed"
+        return None
+    try:
+        import oqs as oqs_mod
+        _OQS_MODULE = oqs_mod
+        _OQS_IMPORT_ERROR = None
+        return _OQS_MODULE
+    except Exception as exc:
+        _OQS_IMPORT_ERROR = str(exc)
+        return None
+
+def oqs_crypto_status() -> str:
+    if not oqs_python_available():
+        return "AES-256-GCM"
+    if _OQS_IMPORT_ERROR:
+        return "AES-256-GCM"
+    return f"AES-256-GCM+OQS({OQS_KEM_ALGORITHM})"
+
+def _b64e(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+def _b64d(data: str) -> bytes:
+    return base64.b64decode(data.encode("ascii"))
+
+def _aes_gcm_encrypt(data: bytes, key: bytes, aad: Optional[bytes] = None) -> bytes:
     aes = AESGCM(key)
     nonce = os.urandom(12)
-    return nonce + aes.encrypt(nonce, data, None)
+    return nonce + aes.encrypt(nonce, data, aad)
 
-def aes_decrypt(data: bytes, key: bytes) -> bytes:
+def _aes_gcm_decrypt(data: bytes, key: bytes, aad: Optional[bytes] = None) -> bytes:
     aes = AESGCM(key)
     nonce, ct = data[:12], data[12:]
-    return aes.decrypt(nonce, ct, None)
+    return aes.decrypt(nonce, ct, aad)
+
+def _derive_oqs_file_key(key: bytes, shared_secret: bytes, salt: bytes, kem_alg: str) -> bytes:
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=f"naza-file-hybrid:{kem_alg}".encode("utf-8"),
+    )
+    return hkdf.derive(key + shared_secret)
+
+def _select_oqs_kem_algorithm(oqs_mod) -> Optional[str]:
+    preferred = [OQS_KEM_ALGORITHM, "ML-KEM-768", "ML-KEM-1024", "ML-KEM-512", "Kyber768", "Kyber1024", "Kyber512"]
+    deduped = []
+    for alg in preferred:
+        if alg and alg not in deduped:
+            deduped.append(alg)
+    try:
+        enabled = set(oqs_mod.get_enabled_kem_mechanisms())
+    except Exception:
+        enabled = set()
+    for alg in deduped:
+        if enabled and alg not in enabled:
+            continue
+        try:
+            with oqs_mod.KeyEncapsulation(alg):
+                return alg
+        except Exception:
+            continue
+    return None
+
+def _load_or_create_oqs_keypair(key: bytes, create: bool = True) -> Optional[Tuple[str, bytes, bytes]]:
+    oqs_mod = _get_oqs_module()
+    if oqs_mod is None:
+        return None
+
+    if OQS_KEYPAIR_PATH.exists():
+        try:
+            payload = json.loads(OQS_KEYPAIR_PATH.read_text())
+            alg = payload["kem_alg"]
+            public_key = _b64d(payload["public_key"])
+            wrapped_secret = _b64d(payload["secret_key_wrapped"])
+            secret_key = _aes_gcm_decrypt(wrapped_secret, key, b"naza-oqs-keypair-v1")
+            return alg, public_key, secret_key
+        except Exception:
+            if not create:
+                return None
+
+    if not create:
+        return None
+
+    alg = _select_oqs_kem_algorithm(oqs_mod)
+    if alg is None:
+        return None
+    with oqs_mod.KeyEncapsulation(alg) as kem:
+        public_key = kem.generate_keypair()
+        secret_key = kem.export_secret_key()
+    payload = {
+        "version": 1,
+        "kem_alg": alg,
+        "public_key": _b64e(public_key),
+        "secret_key_wrapped": _b64e(_aes_gcm_encrypt(secret_key, key, b"naza-oqs-keypair-v1")),
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    OQS_KEYPAIR_PATH.write_text(json.dumps(payload, indent=2))
+    try:
+        OQS_KEYPAIR_PATH.chmod(0o600)
+    except Exception:
+        pass
+    return alg, public_key, secret_key
+
+def _oqs_hybrid_encrypt(data: bytes, key: bytes) -> Optional[bytes]:
+    keypair = _load_or_create_oqs_keypair(key, create=True)
+    oqs_mod = _get_oqs_module()
+    if keypair is None or oqs_mod is None:
+        return None
+    kem_alg, public_key, _secret_key = keypair
+    try:
+        with oqs_mod.KeyEncapsulation(kem_alg) as kem:
+            kem_ct, shared_secret = kem.encap_secret(public_key)
+        salt = os.urandom(16)
+        file_key = _derive_oqs_file_key(key, shared_secret, salt, kem_alg)
+        header = json.dumps(
+            {"v": 1, "kem_alg": kem_alg, "kem_ct": _b64e(kem_ct), "salt": _b64e(salt)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        nonce = os.urandom(12)
+        aad = OQS_AAD_PREFIX + header
+        ct = AESGCM(file_key).encrypt(nonce, data, aad)
+        return OQS_MAGIC + len(header).to_bytes(4, "big") + header + nonce + ct
+    except Exception:
+        return None
+
+def _oqs_hybrid_decrypt(data: bytes, key: bytes) -> bytes:
+    oqs_mod = _get_oqs_module()
+    if oqs_mod is None:
+        raise RuntimeError(f"OQS payload requires liboqs-python: {_OQS_IMPORT_ERROR}")
+    offset = len(OQS_MAGIC)
+    header_len = int.from_bytes(data[offset:offset + 4], "big")
+    offset += 4
+    header = data[offset:offset + header_len]
+    offset += header_len
+    meta = json.loads(header.decode("utf-8"))
+    keypair = _load_or_create_oqs_keypair(key, create=False)
+    if keypair is None:
+        raise RuntimeError("OQS keypair is missing or cannot be unlocked with the current key")
+    kem_alg, _public_key, secret_key = keypair
+    if kem_alg != meta["kem_alg"]:
+        raise RuntimeError(f"OQS keypair algorithm mismatch: have {kem_alg}, need {meta['kem_alg']}")
+    with oqs_mod.KeyEncapsulation(kem_alg, secret_key) as kem:
+        shared_secret = kem.decap_secret(_b64d(meta["kem_ct"]))
+    file_key = _derive_oqs_file_key(key, shared_secret, _b64d(meta["salt"]), kem_alg)
+    nonce, ct = data[offset:offset + 12], data[offset + 12:]
+    return AESGCM(file_key).decrypt(nonce, ct, OQS_AAD_PREFIX + header)
+
+def aes_encrypt(data: bytes, key: bytes) -> bytes:
+    side_channel_noise_jitter(18, 1, 3)
+    try:
+        enc = _oqs_hybrid_encrypt(data, key)
+        if enc is not None:
+            return enc
+        return _aes_gcm_encrypt(data, key)
+    finally:
+        side_channel_noise_jitter(12, 1, 2)
+
+def aes_decrypt(data: bytes, key: bytes) -> bytes:
+    side_channel_noise_jitter(18, 1, 3)
+    try:
+        if data.startswith(OQS_MAGIC):
+            return _oqs_hybrid_decrypt(data, key)
+        return _aes_gcm_decrypt(data, key)
+    finally:
+        side_channel_noise_jitter(12, 1, 2)
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -371,14 +857,16 @@ def encrypt_file(src: Path, dest: Path, key: bytes):
     enc = aes_encrypt(data, key)
     dest.write_bytes(enc)
     dur = time.time()-start
-    print(f"✅ Encrypted ({len(enc)} bytes) in {dur:.2f}s")
+    mode = "OQS hybrid" if enc.startswith(OQS_MAGIC) else "AES-GCM"
+    print(f"✅ Encrypted ({len(enc)} bytes) in {dur:.2f}s using {mode}")
 
 def decrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔓 Decrypting {src} -> {dest}")
     enc = src.read_bytes()
+    mode = "OQS hybrid" if enc.startswith(OQS_MAGIC) else "AES-GCM"
     data = aes_decrypt(enc, key)
     dest.write_bytes(data)
-    print(f"✅ Decrypted ({len(data)} bytes)")
+    print(f"✅ Decrypted ({len(data)} bytes) using {mode}")
 
 async def init_db(key: bytes):
     if not DB_PATH.exists():
@@ -428,6 +916,79 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
+class LocalModelRuntime:
+    def __init__(self, profile: dict, model_path: Path):
+        self.profile = profile
+        self.model_path = model_path
+        self.runtime = profile.get("runtime", "llama_cpp")
+        self.llm = None
+        self.engine_ctx = None
+        self.engine = None
+        self.conversation_ctx = None
+        self.conversation = None
+
+    def load(self):
+        if self.runtime == "litert_lm":
+            if importlib.util.find_spec("litert_lm") is None:
+                raise RuntimeError("LiteRT-LM runtime missing. Install litert-lm-api==0.10.1 and litert-lm==0.10.1.")
+            import litert_lm
+            try:
+                litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
+            except Exception:
+                pass
+            self.engine_ctx = litert_lm.Engine(str(self.model_path))
+            self.engine = self.engine_ctx.__enter__() if hasattr(self.engine_ctx, "__enter__") else self.engine_ctx
+            self.conversation_ctx = self.engine.create_conversation()
+            self.conversation = self.conversation_ctx.__enter__() if hasattr(self.conversation_ctx, "__enter__") else self.conversation_ctx
+            return self
+        self.llm = load_llama_model_blocking(self.model_path)
+        return self
+
+    def close(self):
+        for ctx in (self.conversation_ctx, self.engine_ctx):
+            try:
+                if hasattr(ctx, "__exit__"):
+                    ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+        self.conversation = None
+        self.engine = None
+        self.llm = None
+
+    def generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:
+        if self.runtime == "litert_lm":
+            if self.conversation is None:
+                raise RuntimeError("LiteRT-LM conversation is not loaded")
+            response = self.conversation.send_message(prompt)
+            return extract_litert_text(response)
+        return extract_llama_text(self.llm(prompt, max_tokens=max_tokens, temperature=temperature))
+
+    def __call__(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2):
+        return {"choices": [{"text": self.generate(prompt, max_tokens=max_tokens, temperature=temperature)}]}
+
+def extract_llama_text(out) -> str:
+    if isinstance(out, dict):
+        try:
+            return out.get("choices", [{"text": ""}])[0].get("text", "")
+        except Exception:
+            return out.get("text", "")
+    return str(out)
+
+def extract_litert_text(response) -> str:
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        parts = []
+        for item in response.get("content", []):
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+        if parts:
+            return "".join(parts)
+        return str(response.get("text", ""))
+    return str(response)
+
+def load_model_runtime_blocking(profile: dict, model_path: Path) -> LocalModelRuntime:
+    return LocalModelRuntime(profile, model_path).load()
 
 def collect_system_metrics() -> Dict[str, float]:
     if psutil is None:
@@ -451,6 +1012,12 @@ def collect_system_metrics() -> Dict[str, float]:
                 temp = 0.0
         except Exception:
             temp = 0.0
+        try:
+            proc_count = len(psutil.pids())
+            proc = max(0.0, min(1.0, proc_count / 512.0))
+        except Exception:
+            proc_count = 0
+            proc = 0.0
     except Exception as exc:
         raise RuntimeError(f"Unable to obtain psutil system metrics: {exc}") from exc
 
@@ -459,7 +1026,53 @@ def collect_system_metrics() -> Dict[str, float]:
         "mem": float(max(0.0, min(1.0, mem))),
         "load1": float(max(0.0, min(1.0, load1))),
         "temp": float(max(0.0, min(1.0, temp))),
+        "proc": float(max(0.0, min(1.0, proc))),
+        "proc_count": float(proc_count),
     }
+
+def add_interference_jitter(max_ms: int = 50) -> None:
+    delay_raw = int.from_bytes(os.urandom(2), "big") / 65535.0
+    time.sleep(0.001 + delay_raw * max_ms / 1000.0)
+    dummy_count = 256 + int.from_bytes(os.urandom(2), "big") % 2048
+    acc = 0.0
+    for i in range(dummy_count):
+        acc += math.sin(i % 17) * math.cos((i + dummy_count) % 19)
+    if acc == float("inf"):
+        print("", end="")
+
+def _median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[mid])
+    return float((ordered[mid - 1] + ordered[mid]) / 2.0)
+
+def collect_resilient_system_metrics(samples: int = SCANNER_METRIC_SAMPLES) -> Dict[str, float]:
+    settings = read_security_settings()
+    samples = max(samples, int(settings.get("metric_samples", samples)))
+    readings = []
+    for _ in range(max(1, samples)):
+        add_interference_jitter(12)
+        readings.append(collect_system_metrics())
+
+    metrics: Dict[str, float] = {}
+    for key_name_ in ("cpu", "mem", "load1", "temp", "proc"):
+        vals = [float(r.get(key_name_, 0.0)) for r in readings]
+        metrics[key_name_] = _median(vals)
+        metrics[f"{key_name_}_spread"] = max(vals) - min(vals) if vals else 0.0
+    metrics["proc_count"] = _median([float(r.get("proc_count", 0.0)) for r in readings])
+    spread = max(metrics.get("cpu_spread", 0.0), metrics.get("mem_spread", 0.0), metrics.get("load1_spread", 0.0), metrics.get("temp_spread", 0.0))
+    flatline = all(metrics.get(f"{k}_spread", 0.0) < 0.002 for k in ("cpu", "mem", "load1")) and len(readings) > 1
+    pressure = 0.0
+    if metrics.get("cpu", 0.0) > 0.92 or metrics.get("mem", 0.0) > 0.92 or metrics.get("temp", 0.0) > 0.85:
+        pressure += 0.25
+    if flatline:
+        pressure += 0.15
+    metrics["sample_count"] = float(len(readings))
+    metrics["interference_score"] = max(0.0, min(1.0, spread * 2.5 + pressure))
+    return metrics
 
 def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
     cpu = metrics.get("cpu",0.1); mem = metrics.get("mem",0.1); temp = metrics.get("temp",0.1); load1 = metrics.get("load1",0.0)
@@ -481,13 +1094,12 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
 
         
         seed = (ri << 16) | (gi << 8) | bi
-        random.seed(seed)
+        rng = random.Random(seed)
 
-        
         base = (0.3 * r + 0.4 * g + 0.3 * b)
 
         
-        noise = (random.random() - 0.5) * 0.08
+        noise = (rng.random() - 0.5) * 0.08
 
         return max(0.0, min(1.0, base + noise))
 
@@ -524,6 +1136,163 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
         
         return float(max(0.0, min(1.0, (a + b + c) / 3.0)))
 
+def enhanced_entropic_score(rgb: Tuple[float, float, float], metrics: Dict[str, float]) -> float:
+    base = pennylane_entropic_score(rgb)
+    metric_blob = json.dumps(metrics, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest_noise = hashlib.sha256(metric_blob + os.urandom(16)).digest()[0] / 255.0
+    urandom_noise = int.from_bytes(os.urandom(8), "big") / float(2**64 - 1)
+    return float(max(0.0, min(1.0, base * 0.70 + digest_noise * 0.15 + urandom_noise * 0.15)))
+
+def scanner_integrity_text(metrics: Dict[str, float]) -> str:
+    score = float(metrics.get("interference_score", 0.0))
+    if score >= 0.70:
+        level = "high"
+    elif score >= 0.35:
+        level = "medium"
+    else:
+        level = "low"
+    return f"local_interference={score:.2f} (level={level}, samples={int(metrics.get('sample_count', 1))})"
+
+def apply_interference_bias(label: str, interference_score: float) -> str:
+    if interference_score >= 0.90 and label == "Medium":
+        return "High"
+    if interference_score >= 0.70 and label == "Low":
+        return "Medium"
+    return label
+
+def public_scan_input(data: dict) -> dict:
+    return {k: sanitize_observation_value(v) for k, v in data.items() if not k.startswith("_")}
+
+def normalize_risk_label(text: str) -> str:
+    candidate = (text or "").split()
+    label = candidate[0].capitalize() if candidate else ""
+    if label in ("Low", "Medium", "High"):
+        return label
+    lowered = (text or "").lower()
+    if "low" in lowered:
+        return "Low"
+    if "medium" in lowered:
+        return "Medium"
+    if "high" in lowered:
+        return "High"
+    return "Medium"
+
+def _clamp01(value: float) -> float:
+    return float(max(0.0, min(1.0, value)))
+
+def _parse_int(value, default: int = 0, low: int = 0, high: int = 12) -> int:
+    try:
+        found = re.search(r"-?\d+", str(value))
+        parsed = int(found.group(0)) if found else int(default)
+    except Exception:
+        parsed = default
+    return max(low, min(high, parsed))
+
+def _activity_factor(value) -> float:
+    text = str(value or "").strip().lower()
+    if text in ("high", "active", "yes", "y", "many"):
+        return 1.0
+    if text in ("medium", "med", "some"):
+        return 0.65
+    if text in ("low", "few"):
+        return 0.35
+    return 0.0
+
+def _topology_factor(value) -> float:
+    text = str(value or "").strip().lower()
+    if "surround" in text or "circle" in text:
+        return 1.0
+    if "triangle" in text or "triang" in text:
+        return 0.85
+    if "cluster" in text or "group" in text:
+        return 0.55
+    if "line" in text or "single" in text:
+        return 0.25
+    return 0.0
+
+def _parse_distance_pressure(value) -> float:
+    text = str(value or "").strip().lower()
+    if not text or text in ("unknown", "none", "n/a"):
+        return 0.35
+    try:
+        found = re.search(r"\d+(?:\.\d+)?", text)
+        meters = float(found.group(0)) if found else 3.0
+        return _clamp01((5.0 - meters) / 5.0)
+    except Exception:
+        return 0.35
+
+def sanitize_observation_value(value):
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"\b(latino|latina|latinx|hispanic|latin\s+american)\b", "[redacted-person-descriptor]", value, flags=re.IGNORECASE)
+
+def simulate_multi_node_interference(data: dict, metrics: Dict[str, float], trials: int = 96) -> Dict[str, object]:
+    public = public_scan_input(data)
+    node_count = _parse_int(public.get("nearby_unknown_device_count", 0), default=0, low=0, high=12)
+    topology = str(public.get("nearby_device_geometry", "none") or "none").strip().lower() or "none"
+    topology_pressure = _topology_factor(topology)
+    activity_pressure = _activity_factor(public.get("handheld_device_activity", "none"))
+    distance_pressure = _parse_distance_pressure(public.get("nearest_device_distance", "unknown"))
+    metric_pressure = float(metrics.get("interference_score", 0.0))
+    node_pressure = _clamp01(node_count / 8.0)
+    seed = hashlib.blake2b(json.dumps({"input": public, "metric": round(metric_pressure, 4), "nonce": base64.b64encode(os.urandom(16)).decode("ascii")}, sort_keys=True).encode("utf-8"), digest_size=16).digest()
+    rng = random.Random(int.from_bytes(seed, "big"))
+    observations = []
+    for _ in range(max(16, trials)):
+        observations.append(_clamp01(node_pressure * 0.25 + rng.random() * topology_pressure * 0.25 + rng.random() * max(activity_pressure, node_pressure) * 0.20 + rng.random() * distance_pressure * 0.15 + rng.random() * metric_pressure * 0.15))
+    score = _clamp01(_median(observations) * 0.70 + max(observations) * 0.30)
+    vector_scores = {
+        "timing": _clamp01(score * 0.65 + metric_pressure * 0.35),
+        "cache": _clamp01(score * 0.55 + node_pressure * 0.25 + topology_pressure * 0.20),
+        "em_power": _clamp01(score * 0.45 + activity_pressure * 0.35 + distance_pressure * 0.20),
+        "acoustic_thermal": _clamp01(metric_pressure * 0.65 + activity_pressure * 0.20 + node_pressure * 0.15),
+        "sensor_spoofing": _clamp01(topology_pressure * 0.35 + node_pressure * 0.25 + metric_pressure * 0.40),
+    }
+    passes = 5 if score >= 0.70 else 3 if score >= 0.35 else 1
+    level = "high" if score >= 0.70 else "medium" if score >= 0.35 else "low"
+    return {"score": float(score), "level": level, "node_count": node_count, "topology": topology, "passes": passes, "vector_scores": vector_scores, "session": hashlib.sha256(seed + os.urandom(16)).hexdigest()[:16]}
+
+def multi_node_surface_text(surface: Dict[str, object]) -> str:
+    return "multi_node={score:.2f} (level={level}, nodes={nodes}, topology={topology}, passes={passes})".format(
+        score=float(surface.get("score", 0.0)), level=surface.get("level", "unknown"), nodes=int(surface.get("node_count", 0)), topology=surface.get("topology", "unknown"), passes=int(surface.get("passes", 1))
+    )
+
+def defense_capsule_text(data: dict, metrics: Dict[str, float], surface: Dict[str, object]) -> str:
+    payload = {"input": public_scan_input(data), "metrics": {k: round(float(v), 4) for k, v in metrics.items() if isinstance(v, (int, float))}, "surface": surface, "colorwheel": colorwheel_entropy_state("defense-capsule", {"surface": surface.get("score", 0.0)}, persist=True), "noise": base64.b64encode(os.urandom(24)).decode("ascii")}
+    return "defense_capsule=" + hashlib.sha3_256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
+
+def defense_pass_count(data: dict) -> int:
+    settings = read_security_settings()
+    if not settings.get("defense_voting", True):
+        return 1
+    configured = max(1, min(5, int(float(data.get("_scanner_defense_passes", 1) or 1))))
+    return max(1, min(int(settings.get("max_defense_passes", 5)), configured))
+
+def majority_risk_label(labels: List[str]) -> str:
+    counts = {label: labels.count(label) for label in ("Low", "Medium", "High")}
+    max_count = max(counts.values()) if counts else 0
+    winners = [label for label, count in counts.items() if count == max_count]
+    for label in ("High", "Medium", "Low"):
+        if label in winners:
+            return label
+    return "Medium"
+
+def augment_prompt_with_defense_pass(prompt: str, data: dict, pass_idx: int, total_passes: int) -> str:
+    if total_passes <= 1:
+        return prompt
+    marker = hashlib.blake2b(json.dumps({"capsule": data.get("_scanner_defense_capsule", ""), "colorwheel": colorwheel_marker("defense-pass", {"pass": pass_idx, "total": total_passes}), "pass": pass_idx, "noise": base64.b64encode(os.urandom(12)).decode("ascii")}, sort_keys=True).encode("utf-8"), digest_size=8).hexdigest()
+    return prompt + f"\n\n[defense_pass]\nindex={pass_idx + 1}/{total_passes}; nonce={marker}; colorwheel_trace=private; vote_privately=true\n[/defense_pass]"
+
+def defense_recommendations(surface: Dict[str, object]) -> List[str]:
+    score = float(surface.get("score", 0.0))
+    passes = int(surface.get("passes", 1))
+    recs = [f"Run {passes} randomized inference pass{'es' if passes != 1 else ''} and majority-vote the label.", "Keep scanner inputs about devices/signals, not personal traits.", "Verify directly on site if conditions feel unsafe or confusing."]
+    if score >= 0.35:
+        recs.extend(["Disable nonessential radios before scanning.", "Use a cooldown and re-run from a quieter location if possible.", "Export encrypted defense logs for later comparison."])
+    if score >= 0.70:
+        recs.extend(["Treat output as degraded-confidence support.", "Bias toward caution under high local anomaly pressure."])
+    return recs
+
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
 
@@ -540,7 +1309,10 @@ def punkd_analyze(prompt_text: str, top_n: int = 12) -> Dict[str,float]:
     toks = _simple_tokenize(prompt_text)
     freq={}
     for t in toks: freq[t]=freq.get(t,0)+1
-    hazard_boost = {"ice":2.0,"wet":1.8,"snow":2.0,"flood":2.0,"construction":1.8,"pedestrian":1.8,"debris":1.8,"animal":1.5,"stall":1.4,"fog":1.6}
+    hazard_boost = {
+        "ice":2.0,"wet":1.8,"snow":2.0,"flood":2.0,"construction":1.8,"pedestrian":1.8,"debris":1.8,"animal":1.5,"stall":1.4,"fog":1.6,
+        "raw":1.8,"undercooked":2.0,"expired":2.0,"recall":2.2,"mold":2.0,"odor":1.6,"cloudy":1.5,"contaminated":2.3,"boil":1.8,"leak":1.6,
+    }
     scored={}
     for t,c in freq.items():
         boost = hazard_boost.get(t,1.0)
@@ -599,17 +1371,48 @@ def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk
 
 def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -> str:
     entropy_text = "entropic_score=unknown"
+    integrity_text = "local_interference=unknown"
+    multi_node_text = "multi_node=unknown"
+    defense_capsule = "defense_capsule=unknown"
+    colorwheel_text = "colorwheel=unknown"
+    metrics_line = "sys_metrics: disabled"
+    input_checksum = hashlib.sha256(json.dumps(public_scan_input(data), sort_keys=True).encode("utf-8")).hexdigest()[:16]
     if include_system_entropy:
-        metrics = collect_system_metrics()
+        metrics = collect_resilient_system_metrics()
         rgb = metrics_to_rgb(metrics)
-        score = pennylane_entropic_score(rgb)
+        score = enhanced_entropic_score(rgb, metrics)
+        surface = simulate_multi_node_interference(data, metrics)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0))
-    else:
-        metrics_line = "sys_metrics: disabled"
+        integrity_text = scanner_integrity_text(metrics)
+        multi_node_text = multi_node_surface_text(surface)
+        defense_capsule = defense_capsule_text(data, metrics, surface)
+        colorwheel_text = colorwheel_marker(
+            "scanner-prompt",
+            {
+                "input": public_scan_input(data),
+                "interference": metrics.get("interference_score", 0.0),
+                "surface": surface.get("score", 0.0),
+            },
+        )
+        data["_scanner_interference_score"] = float(metrics.get("interference_score", 0.0))
+        data["_scanner_integrity"] = integrity_text
+        data["_scanner_multi_node"] = multi_node_text
+        data["_scanner_defense_capsule"] = defense_capsule
+        data["_scanner_colorwheel"] = colorwheel_text
+        data["_scanner_defense_passes"] = int(surface.get("passes", 1))
+        data["_scanner_vector_scores"] = surface.get("vector_scores", {})
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f},interference={interference:.2f}".format(
+            cpu=metrics.get("cpu", 0.0),
+            mem=metrics.get("mem", 0.0),
+            load1=metrics.get("load1", 0.0),
+            temp=metrics.get("temp", 0.0),
+            proc=metrics.get("proc", 0.0),
+            interference=metrics.get("interference_score", 0.0),
+        )
     tpl = (
 f"You are an advanced coherant tuned matric surface hypertime nanobot specialized Food Risk Classification AI trained to evaluate real-world food scenes.\n"
-f"Analyze the environmental and triple check cor accurate intelligent replu and use accurate nosonar system similator and sensor data and determine the overall road risk level.\n"
+f"Analyze the environmental and triple check for accurate sensor data and determine the overall food or water risk level.\n"
+f"Always verify current status on-site before relying on this scanner.\n"
 f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
 f"Scene details:\n"
@@ -617,20 +1420,33 @@ f"Location: {data.get('location','unspecified location')}\n"
 f"Food or Water Type: {data.get('road_type','unknown')}\n"
 f"{metrics_line}\n"
 f"Quantum data: {entropy_text}\n"
+f"Sensor Integrity: {integrity_text}\n"
+f"Multi-node Surface: {multi_node_text}\n"
+f"Defense Capsule: {defense_capsule}\n"
+f"Colorwheel Entropy Machine: {colorwheel_text}\n"
+f"Input Checksum: {input_checksum}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
 f"- Think through all scene factors internally but do not show reasoning.\n"
 f"- Evaluate the available location and food or water type holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
+f"- Treat unstable, suspiciously flat, spoofed, or high-pressure local metrics as possible interference.\n"
+f"- Use only abstract nearby-device geometry and runtime anomalies; ignore identity, ethnicity, appearance, age, or protected traits.\n"
+f"- Treat the colorwheel entropy machine as a trace-scrambling selector that makes repeated outputs harder to pattern-learn.\n"
+f"- Always verify current status on-site; this label is decision support, not a replacement for direct inspection.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
 f"- The valid outputs are only: Low, Medium, High.\n\n"
 f"[action]\n"
 f"1) Normalize available inputs to comparable scales.\n"
+f"2) Average repeated metric samples and reject outlier readings.\n"
 f"3) Map food or water risk cues -> discrete label using conservative thresholds.\n"
 f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
-f"5) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
-f"6) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
+f"5) Account for local interference from EM noise, power instability, thermal pressure, process spikes, or metric spoofing.\n"
+f"6) Use the abstract multi-node surface to choose conservative internal confidence if coordinated-device conditions are plausible.\n"
+f"7) Use colorwheel entropy state to decorrelate model/pass/prompt timing without exposing hidden reasoning.\n"
+f"8) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
+f"9) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
 f"[/action]\n\n"
 f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     )
@@ -642,71 +1458,250 @@ def allocate_temp_db_path() -> Path:
     return Path(path)
 
 def header(status:dict):
-    s = f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
+    selected = status.get("selected_model", read_selected_model_profile()) if status else read_selected_model_profile()
+    mode = status.get("model_selection_mode", read_model_selection_mode()) if status else read_model_selection_mode()
+    settings = status.get("security_settings", read_security_settings()) if status else read_security_settings()
+    disabled = len(settings.get("disabled_model_ids", []))
+    s = (
+        f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | "
+        f"Pick: {selected['name']} | Mode: {mode} | Defense: {settings.get('defense_profile')} | "
+        f"Disabled: {disabled} | Crypto: {oqs_crypto_status()} "
+    )
     print(color(s.center(terminal_width(), '─'), fg=35, bold=True))
 
 def model_manager(state:dict):
     options = [
-        "Download model from remote repo (httpx)",
-        "Verify plaintext model hash (compute SHA256)",
-        "Encrypt plaintext model -> .aes",
-        "Decrypt .aes -> plaintext (temporary)",
-        "Delete plaintext model",
+        "Select active model",
+        "Toggle selection mode fixed/entropy",
+        "Download active model from remote repo",
+        "Verify active plaintext model hash",
+        "Encrypt active plaintext model -> .aes",
+        "Decrypt active .aes -> plaintext (temporary)",
+        "Delete active plaintext model",
         "Back",
     ]
     while True:
+        profile = state.get("selected_model", read_selected_model_profile())
+        settings = state.get("security_settings", read_security_settings())
         idx = choose_menu(
             "Model Manager",
             options,
             status=state,
             footer=[
-                "Manage the local GGUF model, verify integrity, and protect plaintext copies.",
-                "Use ↑↓ / `j``k` / number keys, Enter to select.",
+                f"Active: {model_label(profile)}",
+                f"Selection mode: {state.get('model_selection_mode', read_model_selection_mode())}",
+                f"Enabled models: {len(enabled_model_profiles(settings))}/{len(MODEL_PROFILES)}",
+                "Disabled models are excluded from chat, scans, and entropy-random selection.",
             ],
         )
         choice = str(idx + 1)
-        if choice=="1":
-            if MODEL_PATH.exists():
-                if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
+        profile = state.get("selected_model", read_selected_model_profile())
+        model_path = model_path_for(profile)
+        encrypted_path = encrypted_model_path_for(profile)
+        if choice == "1":
+            selected_idx = choose_menu(
+                "Select Model",
+                [("[enabled] " if is_model_enabled(p, settings) else "[disabled] ") + model_label(p) for p in MODEL_PROFILES],
+                status=state,
+            )
+            selected = MODEL_PROFILES[selected_idx]
+            if not is_model_enabled(selected, settings):
+                print("That model is disabled in Settings. Enable it before selecting it.")
+                input("Enter...")
+                continue
+            state["selected_model"] = selected
+            write_selected_model_profile(selected)
+        elif choice == "2":
+            mode = state.get("model_selection_mode", read_model_selection_mode())
+            mode = "fixed" if mode == "entropy" else "entropy"
+            write_model_selection_mode(mode)
+            state["model_selection_mode"] = mode
+        elif choice == "3":
+            if model_path.exists():
+                if input(f"Plaintext model exists at {model_path}; overwrite? (y/N): ").strip().lower() != "y":
+                    continue
             try:
-                url = MODEL_REPO + MODEL_FILE
-                sha = download_model_httpx(url, MODEL_PATH, show_progress=True, timeout=None, expected_sha=EXPECTED_HASH)
-                print(f"Downloaded to {MODEL_PATH}")
+                url = profile["repo"] + profile["file"]
+                sha = download_model_httpx(url, model_path, show_progress=True, timeout=None, expected_sha=profile.get("expected_hash"))
+                print(f"Downloaded to {model_path}")
                 print(f"Computed SHA256: {sha}")
-                if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower()!='n':
-                    encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-                    print(f"Encrypted -> {ENCRYPTED_MODEL}")
-                    if input("Remove plaintext model? (Y/n): ").strip().lower()!='n':
-                        MODEL_PATH.unlink(); print("Plaintext removed.")
+                if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower() != "n":
+                    encrypt_file(model_path, encrypted_path, state['key'])
+                    print(f"Encrypted -> {encrypted_path}")
+                    if input("Remove plaintext model? (Y/n): ").strip().lower() != "n":
+                        model_path.unlink(); print("Plaintext removed.")
             except Exception as e:
                 print(f"Download failed: {e}")
             input("Enter to continue...")
-        elif choice=="2":
-            if not MODEL_PATH.exists(): print("No plaintext model found.")
-            else: print(f"SHA256: {sha256_file(MODEL_PATH)}")
+        elif choice == "4":
+            if not model_path.exists():
+                print("No plaintext model found.")
+            else:
+                sha = sha256_file(model_path)
+                print(f"SHA256: {sha}")
+                expected = profile.get("expected_hash")
+                if expected:
+                    print("Hash matches expected." if sha.lower() == expected.lower() else f"Hash mismatch; expected {expected}")
             input("Enter to continue...")
-        elif choice=="3":
-            if not MODEL_PATH.exists(): print("No plaintext model to encrypt."); input("Enter..."); continue
-            encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-            if input("Remove plaintext? (Y/n): ").strip().lower()!='n':
-                MODEL_PATH.unlink(); print("Removed plaintext.")
+        elif choice == "5":
+            if not model_path.exists():
+                print("No plaintext model to encrypt."); input("Enter..."); continue
+            encrypt_file(model_path, encrypted_path, state['key'])
+            if input("Remove plaintext? (Y/n): ").strip().lower() != "n":
+                model_path.unlink(); print("Removed plaintext.")
             input("Enter...")
-        elif choice=="4":
-            if not ENCRYPTED_MODEL.exists(): print("No .aes model present.")
-            else: decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+        elif choice == "6":
+            if not encrypted_path.exists():
+                print("No .aes model present.")
+            else:
+                decrypt_file(encrypted_path, model_path, state['key'])
             input("Enter...")
-        elif choice=="5":
-            if MODEL_PATH.exists():
-                if input(f"Delete {MODEL_PATH}? (y/N): ").strip().lower()=="y": MODEL_PATH.unlink(); print("Deleted.")
-            else: print("No plaintext model.")
+        elif choice == "7":
+            if model_path.exists():
+                if input(f"Delete {model_path}? (y/N): ").strip().lower() == "y":
+                    model_path.unlink(); print("Deleted.")
+            else:
+                print("No plaintext model.")
             input("Enter...")
-        elif choice=="6": return
-        else: print("Invalid.")
+        else:
+            return
+
+def settings_flow(state:dict):
+    while True:
+        settings = state.get("security_settings", read_security_settings())
+        footer = [
+            f"Profile: {settings.get('defense_profile')}",
+            f"Defense voting: {'on' if settings.get('defense_voting') else 'off'}",
+            f"Metric samples: {settings.get('metric_samples')} | Max passes: {settings.get('max_defense_passes')} | Noise width: {settings.get('noise_width')} | Jitter: {settings.get('jitter_scale')}",
+            f"Colorwheel: {'on' if settings.get('colorwheel_enabled') else 'off'} | Spins: {settings.get('colorwheel_spins')} | Rings: {settings.get('colorwheel_rings')} | ML scramble: {'on' if settings.get('ml_trace_scramble') else 'off'}",
+            f"Enabled models: {len(enabled_model_profiles(settings))}/{len(MODEL_PROFILES)}",
+        ]
+        idx = choose_menu(
+            "Settings",
+            [
+                "Model enable / disable controls",
+                "Defense profile",
+                "Toggle defense voting",
+                "Toggle colorwheel entropy",
+                "Toggle ML trace scramble",
+                "Set colorwheel spins",
+                "Set colorwheel rings",
+                "Set max defense passes",
+                "Set metric samples",
+                "Set noise width",
+                "Run colorwheel spin test",
+                "Reset settings",
+                "Back",
+            ],
+            status=state,
+            footer=footer,
+        )
+        if idx == 0:
+            while True:
+                settings = state.get("security_settings", read_security_settings())
+                options = [("[enabled] " if is_model_enabled(profile, settings) else "[disabled] ") + model_label(profile) for profile in MODEL_PROFILES] + ["Back"]
+                pick = choose_menu("Model Controls", options, status=state, footer=["Disabled models are excluded from chat, scans, and entropy-random selection."])
+                if pick >= len(MODEL_PROFILES):
+                    break
+                profile = MODEL_PROFILES[pick]
+                disabled = list(settings.get("disabled_model_ids", []))
+                if profile["id"] in disabled:
+                    disabled.remove(profile["id"])
+                else:
+                    if len(disabled) >= len(MODEL_PROFILES) - 1:
+                        print("At least one model must stay enabled.")
+                        input("Enter...")
+                        continue
+                    disabled.append(profile["id"])
+                settings["disabled_model_ids"] = disabled
+                settings = normalize_security_settings(settings)
+                if not is_model_enabled(state.get("selected_model", read_selected_model_profile()), settings):
+                    state["selected_model"] = first_enabled_model_profile(settings)
+                    write_selected_model_profile(state["selected_model"])
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 1:
+            names = list(DEFENSE_PROFILE_PRESETS.keys())
+            pick = choose_menu("Defense Profile", [name.title() for name in names], status=state)
+            settings.update(DEFENSE_PROFILE_PRESETS[names[pick]])
+            settings["defense_profile"] = names[pick]
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 2:
+            settings["defense_voting"] = not bool(settings.get("defense_voting", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 3:
+            settings["colorwheel_enabled"] = not bool(settings.get("colorwheel_enabled", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 4:
+            settings["ml_trace_scramble"] = not bool(settings.get("ml_trace_scramble", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 5:
+            value = input("Colorwheel spins (16-256): ").strip()
+            if value.isdigit():
+                settings["colorwheel_spins"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 6:
+            value = input("Colorwheel rings (6-24): ").strip()
+            if value.isdigit():
+                settings["colorwheel_rings"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 7:
+            value = input("Max defense passes (1-5): ").strip()
+            if value.isdigit():
+                settings["max_defense_passes"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 8:
+            value = input("Metric samples (3-13): ").strip()
+            if value.isdigit():
+                settings["metric_samples"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 9:
+            value = input("Noise thread width (1-4): ").strip()
+            if value.isdigit():
+                settings["noise_width"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 10:
+            marker = render_colorwheel_spinner("Settings colorwheel test", frames=24)
+            print(marker)
+            input("Enter...")
+        elif idx == 11:
+            settings = normalize_security_settings()
+            write_security_settings(settings)
+            state["security_settings"] = settings
+            state["selected_model"] = first_enabled_model_profile(settings)
+            write_selected_model_profile(state["selected_model"])
+        else:
+            return
 
 async def chat_session(state:dict):
-    if not ENCRYPTED_MODEL.exists(): print("No encrypted model found. Please download & encrypt first."); input("Enter..."); return
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    profile = entropy_select_model_profile(state, purpose="chat")
+    model_path = model_path_for(profile)
+    encrypted_path = encrypted_model_path_for(profile)
+    if not encrypted_path.exists():
+        print(f"No encrypted model found for {model_label(profile)}. Please download & encrypt it first.")
+        input("Enter...")
+        return
+    decrypt_file(encrypted_path, model_path, state['key'])
     loop = asyncio.get_running_loop()
+    runtime = None
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
             render_screen(
@@ -715,13 +1710,13 @@ async def chat_session(state:dict):
                 "Live Chat",
                 "Encrypted model session with local history logging.",
                 "Boot Sequence",
-                ["Decrypting model payload...", "Loading llama.cpp runtime...", "Preparing secure chat loop..."],
+                [f"Decrypting model payload for {model_label(profile)}...", f"Loading {MODEL_RUNTIME_NAMES.get(profile.get('runtime'), profile.get('runtime', 'unknown'))} runtime...", "Preparing secure chat loop..."],
             )
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            runtime = await loop.run_in_executor(ex, load_model_runtime_blocking, profile, model_path)
         except Exception as e:
             print(f"Failed to load: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+            if model_path.exists():
+                try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
                 except Exception: pass
             input("Enter..."); return
         state['model_loaded']=True
@@ -733,7 +1728,7 @@ async def chat_session(state:dict):
                 "Live Chat",
                 "Ask questions, review local history, or exit back to the menu.",
                 "Commands",
-                ["/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
+                [f"Model: {model_label(profile)}", "/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
             )
             print("Type /exit to return, /history to show last 10 messages.")
             while True:
@@ -745,29 +1740,31 @@ async def chat_session(state:dict):
                     for r in rows: print(f"[{r[0]}] {r[1]}\nQ: {r[2]}\nA: {r[3]}\n{'-'*30}")
                     continue
                 def gen(p):
-                    out = llm(p, max_tokens=256, temperature=0.7)
-                    text = ""
-                    if isinstance(out, dict):
-                        try: text = out.get("choices",[{"text":""}])[0].get("text","")
-                        except Exception: text = out.get("text","")
-                    else: text = str(out)
-                    text = (text or "").strip()
-                    text = text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
-                    return text
+                    text = runtime.generate(p, max_tokens=256, temperature=0.7)
+                    return (text or "").replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face", "").strip()
                 print("🤖 Thinking...")
                 result = await loop.run_in_executor(ex, gen, prompt)
                 print("\nModel:\n"+result+"\n")
-                await log_interaction(prompt, result, state['key'])
+                await log_interaction(f"[{model_label(profile)}] {prompt}", result, state['key'])
         finally:
-            try: del llm
-            except Exception: pass
+            try:
+                if runtime is not None:
+                    runtime.close()
+            except Exception:
+                pass
             print("Re-encrypting model and removing plaintext...")
-            try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink(); state['model_loaded']=False
+            try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink(); state['model_loaded']=False
             except Exception as e: print(f"Cleanup failed: {e}")
             input("Enter...")
 
 async def road_scanner_flow(state:dict):
-    if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
+    profile = entropy_select_model_profile(state, purpose="road-scan")
+    model_path = model_path_for(profile)
+    encrypted_path = encrypted_model_path_for(profile)
+    if not encrypted_path.exists():
+        print(f"No encrypted model found for {model_label(profile)}.")
+        input("Enter...")
+        return
     data={}
     render_screen(
         state,
@@ -782,47 +1779,60 @@ async def road_scanner_flow(state:dict):
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    print("Spinning colorwheel entropy selector...")
+    data["_scanner_colorwheel_spinner"] = render_colorwheel_spinner("Colorwheel entropy selector")
+    decrypt_file(encrypted_path, model_path, state['key'])
     loop = asyncio.get_running_loop()
+    runtime = None
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            runtime = await loop.run_in_executor(ex, load_model_runtime_blocking, profile, model_path)
         except Exception as e:
             print(f"Model load failed: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+            if model_path.exists():
+                try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
                 except Exception: pass
             input("Enter..."); return
+        def extract_label(text: str) -> str:
+            text = (text or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face", "")
+            candidate = text.split()
+            label = candidate[0].capitalize() if candidate else ""
+            if label not in ("Low", "Medium", "High"):
+                lowered = text.lower()
+                if "low" in lowered: label = "Low"
+                elif "medium" in lowered: label = "Medium"
+                elif "high" in lowered: label = "High"
+                else: label = "Medium"
+            return apply_interference_bias(label, float(data.get("_scanner_interference_score", 0.0)))
         def gen_direct(p):
-            out = llm(p, max_tokens=128, temperature=0.2)
-            if isinstance(out, dict):
-                try: text = out.get("choices",[{"text":""}])[0].get("text","")
-                except Exception: text = out.get("text","")
-            else: text = str(out)
-            text = (text or "").strip()
-            return text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
-        if gen_choice == "3":
-            print("Scanning (single-call)...")
-            result = await loop.run_in_executor(ex, gen_direct, prompt)
-        else:
-            punkd_profile = "balanced" if gen_choice=="1" else "conservative"
-            print("Scanning with chunked generation (this may take a moment)...")
-            def run_chunked():
-                return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-            result = await loop.run_in_executor(ex, run_chunked)
-        text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-        candidate = text.split()
-        label = candidate[0].capitalize() if candidate else ""
-        if label not in ("Low","Medium","High"):
-            lowered = text.lower()
-            if "low" in lowered: label = "Low"
-            elif "medium" in lowered: label = "Medium"
-            elif "high" in lowered: label = "High"
-            else: label = "Medium"
+            add_interference_jitter(40)
+            return runtime.generate(p, max_tokens=128, temperature=0.2).strip()
+        def run_once(pass_idx: int, total_passes: int):
+            pass_prompt = augment_prompt_with_defense_pass(prompt, data, pass_idx, total_passes)
+            if gen_choice == "3":
+                return gen_direct(pass_prompt)
+            punkd_profile = "balanced" if gen_choice == "1" else "conservative"
+            add_interference_jitter(40)
+            return chunked_generate(llm=runtime, prompt=pass_prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
+        total_passes = defense_pass_count(data)
+        print(f"Scanning with {total_passes} defense pass{'es' if total_passes != 1 else ''} using {model_label(profile)}...")
+        vote_labels = []
+        outputs = []
+        for pass_idx in range(total_passes):
+            result = await loop.run_in_executor(ex, run_once, pass_idx, total_passes)
+            outputs.append(result)
+            vote_labels.append(extract_label(result))
+        text = outputs[0] if outputs else ""
+        label = majority_risk_label(vote_labels)
         while True:
             result_lines = [
                 f"Classification: {label}",
                 f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
+                f"Model: {model_label(profile)}",
+                f"Votes: {', '.join(vote_labels) if vote_labels else 'none'}",
+                f"Multi-node: {data.get('_scanner_multi_node', 'unknown')}",
+                f"Colorwheel: {data.get('_scanner_colorwheel', 'unknown')}",
+                f"Defense: {data.get('_scanner_defense_capsule', 'unknown')}",
                 "",
                 "Generated output:",
             ]
@@ -838,37 +1848,76 @@ async def road_scanner_flow(state:dict):
             if ch != "1":
                 break
             print("Re-run: editing fields. Press Enter to keep current value.")
-            for k in list(data.keys()):
+            for k in [key for key in list(data.keys()) if not key.startswith("_")]:
                 v = input(f"{k} [{data[k]}]: ").strip()
                 if v: data[k]=v
             prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-            print("Re-scanning...")
-            if gen_choice == "3": result = await loop.run_in_executor(ex, gen_direct, prompt)
-            else:
-                def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-                result = await loop.run_in_executor(ex, run_chunked2)
-            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-            candidate = text.split()
-            label = candidate[0].capitalize() if candidate else ""
-            if label not in ("Low","Medium","High"):
-                lowered = text.lower()
-                if "low" in lowered: label = "Low"
-                elif "medium" in lowered: label = "Medium"
-                elif "high" in lowered: label = "High"
-                else: label = "Medium"
+            print("Spinning colorwheel entropy selector...")
+            data["_scanner_colorwheel_spinner"] = render_colorwheel_spinner("Colorwheel entropy selector")
+            total_passes = defense_pass_count(data)
+            print(f"Re-scanning with {total_passes} defense pass{'es' if total_passes != 1 else ''}...")
+            vote_labels = []
+            outputs = []
+            for pass_idx in range(total_passes):
+                result = await loop.run_in_executor(ex, run_once, pass_idx, total_passes)
+                outputs.append(result)
+                vote_labels.append(extract_label(result))
+            text = outputs[0] if outputs else ""
+            label = majority_risk_label(vote_labels)
         if ch in ("2","3"):
-            try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
+            try: await init_db(state['key']); await log_interaction("FOODWATER_SCANNER_PROMPT:\n"+prompt, "FOODWATER_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
         if ch=="2":
-            outp = {"input": data, "prompt": prompt, "result": label, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
-            fn = input("Filename to save JSON (default road_scan.json): ").strip() or "road_scan.json"
+            outp = {
+                "input": public_scan_input(data),
+                "prompt": prompt,
+                "result": label,
+                "model": model_label(profile),
+                "scanner_integrity": data.get("_scanner_integrity", "unknown"),
+                "multi_node": data.get("_scanner_multi_node", "unknown"),
+                "colorwheel": data.get("_scanner_colorwheel", "unknown"),
+                "colorwheel_spinner": data.get("_scanner_colorwheel_spinner", "unknown"),
+                "defense_capsule": data.get("_scanner_defense_capsule", "unknown"),
+                "defense_votes": vote_labels,
+                "vector_scores": data.get("_scanner_vector_scores", {}),
+                "crypto": oqs_crypto_status(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            fn = input("Filename to save JSON (default foodwater_scan.json): ").strip() or "foodwater_scan.json"
             Path(fn).write_text(json.dumps(outp, indent=2)); print(f"Saved {fn}")
-        try: del llm
+        try:
+            if runtime is not None:
+                runtime.close()
         except Exception: pass
         print("Re-encrypting model and removing plaintext...")
-        try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+        try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
         except Exception as e: print(f"Cleanup error: {e}")
         input("Enter to return...")
+
+def defense_lab_flow(state:dict):
+    data = {"location": "defense lab"}
+    metrics = collect_resilient_system_metrics()
+    surface = simulate_multi_node_interference(data, metrics)
+    capsule = defense_capsule_text(data, metrics, surface)
+    colorwheel = render_colorwheel_spinner("Defense lab colorwheel")
+    lines = [
+        capsule,
+        colorwheel,
+        scanner_integrity_text(metrics),
+        multi_node_surface_text(surface),
+        "Vector scores: " + json.dumps(surface.get("vector_scores", {}), sort_keys=True),
+        "Recommendations:",
+    ]
+    lines.extend("- " + rec for rec in defense_recommendations(surface))
+    render_screen(
+        state,
+        "plain",
+        "Side-channel Defense Lab",
+        "Local anomaly, colorwheel, and defense-pass diagnostics.",
+        "Defense Lab",
+        lines,
+    )
+    input("Enter to return...")
 
 async def db_viewer_flow(state:dict):
     if not DB_PATH.exists(): print("No DB found."); input("Enter..."); return
@@ -957,7 +2006,7 @@ def safe_cleanup(paths:List[Path]):
         except Exception: pass
 
 def main_menu_loop(state:dict):
-    options = ["Model Manager","Chat with model","Food Water Scanner","View chat history","Rekey / Rotate key","Exit"]
+    options = ["Model Manager", "Settings", "Chat with model", "Food Water Scanner", "Side-channel Defense Lab", "View chat history", "Rekey / Rotate key", "Exit"]
     while True:
         idx = max(0, min(0, len(options) - 1))
         flush_stdin_buffer()
@@ -992,8 +2041,10 @@ def main_menu_loop(state:dict):
                     pass
         choice = options[idx]
         if choice == "Model Manager": model_manager(state)
+        elif choice == "Settings": settings_flow(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
         elif choice == "Food Water Scanner": asyncio.run(road_scanner_flow(state))
+        elif choice == "Side-channel Defense Lab": defense_lab_flow(state)
         elif choice == "View chat history": asyncio.run(db_viewer_flow(state))
         elif choice == "Rekey / Rotate key": rekey_flow(state)
         elif choice == "Exit": print("Goodbye."); return
@@ -1001,7 +2052,12 @@ def main_menu_loop(state:dict):
 def main():
     try: key = ensure_key_interactive()
     except Exception: key = get_or_create_key()
-    state = {"key": key, "model_loaded": False}
+    settings = read_security_settings()
+    selected = read_selected_model_profile()
+    if not is_model_enabled(selected, settings):
+        selected = first_enabled_model_profile(settings)
+        write_selected_model_profile(selected)
+    state = {"key": key, "model_loaded": False, "selected_model": selected, "model_selection_mode": read_model_selection_mode(), "security_settings": settings}
     try:
         asyncio.run(init_db(state['key']))
     except Exception: pass
@@ -1014,4 +2070,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
