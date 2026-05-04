@@ -2,6 +2,7 @@ import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlit
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -34,12 +35,17 @@ OQS_KEYPAIR_PATH = Path(".oqs_mlkem_keypair.json")
 OQS_KEM_ALGORITHM = os.environ.get("NAZA_OQS_KEM", "ML-KEM-768")
 OQS_MAGIC = b"NAZA-OQS-HYBRID-v1\n"
 OQS_AAD_PREFIX = b"naza-oqs-hybrid-v1:"
+AES_STREAM_MAGIC = b"NAZA-AES-GCM-STREAM-v1\n"
+OQS_STREAM_MAGIC = b"NAZA-OQS-HYBRID-STREAM-v1\n"
+GCM_NONCE_SIZE = 12
+GCM_TAG_SIZE = 16
+FILE_CRYPTO_CHUNK_SIZE = 8 * 1024 * 1024
+MAX_STREAM_HEADER_SIZE = 1024 * 1024
 SCANNER_METRIC_SAMPLES = 5
 EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
 MODEL_PROFILES = [
     {"id": "llama3-small", "name": "Llama 3 Small GGUF", "repo": MODEL_REPO, "file": MODEL_FILE, "expected_hash": EXPECTED_HASH, "runtime": "llama_cpp"},
     {"id": "gemma4-e2b-litert", "name": "Gemma 4 E2B LiteRT-LM", "repo": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/", "file": "gemma-4-E2B-it.litertlm", "expected_hash": "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42", "runtime": "litert_lm"},
-    {"id": "llama32-1b-q2", "name": "Llama 3.2 1B Q2_K GGUF", "repo": "https://huggingface.co/tensorblock/Llama-3.2-1B-GGUF/resolve/main/", "file": "Llama-3.2-1B-Q2_K.gguf", "expected_hash": "4befa51035fc4f08a12a04a2e836d06f76602ed46ffb980e85e955f597c6da6c", "runtime": "llama_cpp"},
 ]
 MODEL_RUNTIME_NAMES = {"llama_cpp": "llama.cpp", "litert_lm": "LiteRT-LM"}
 DEFAULT_SECURITY_SETTINGS = {
@@ -760,11 +766,161 @@ def aes_encrypt(data: bytes, key: bytes) -> bytes:
 def aes_decrypt(data: bytes, key: bytes) -> bytes:
     side_channel_noise_jitter(18, 1, 3)
     try:
+        if data.startswith(AES_STREAM_MAGIC) or data.startswith(OQS_STREAM_MAGIC):
+            raise ValueError("Streaming encrypted payloads must be decrypted with decrypt_file().")
         if data.startswith(OQS_MAGIC):
             return _oqs_hybrid_decrypt(data, key)
         return _aes_gcm_decrypt(data, key)
     finally:
         side_channel_noise_jitter(12, 1, 2)
+
+def _atomic_temp_path(dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for idx in range(1000):
+        candidate = dest.with_name(f"{dest.name}.tmp.{os.getpid()}.{idx}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not allocate temporary output path for {dest}")
+
+def _cleanup_temp(path: Optional[Path]) -> None:
+    if path is None:
+        return
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+def _print_stream_progress(label: str, done: int, total: int, last: float) -> float:
+    now = time.time()
+    if total <= 0:
+        return now
+    if done < total and now - last < 0.5:
+        return last
+    pct = done / total * 100.0
+    sys.stdout.write(f"\r{label}: {pct:5.1f}% ({done // (1024 * 1024)}MB/{total // (1024 * 1024)}MB)")
+    sys.stdout.flush()
+    return now
+
+def _finish_stream_progress(total: int) -> None:
+    if total > 0:
+        print()
+
+def _oqs_hybrid_stream_material(key: bytes) -> Optional[Tuple[bytes, bytes]]:
+    keypair = _load_or_create_oqs_keypair(key, create=True)
+    oqs_mod = _get_oqs_module()
+    if keypair is None or oqs_mod is None:
+        return None
+    kem_alg, public_key, _secret_key = keypair
+    try:
+        with oqs_mod.KeyEncapsulation(kem_alg) as kem:
+            kem_ct, shared_secret = kem.encap_secret(public_key)
+        salt = os.urandom(16)
+        file_key = _derive_oqs_file_key(key, shared_secret, salt, kem_alg)
+        header = json.dumps(
+            {"v": 1, "kem_alg": kem_alg, "kem_ct": _b64e(kem_ct), "salt": _b64e(salt)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return file_key, header
+    except Exception:
+        return None
+
+def _encrypt_stream_aes_gcm(src: Path, dest: Path, key: bytes, prefix: bytes, aad: bytes, label: str) -> int:
+    total = src.stat().st_size
+    nonce = os.urandom(GCM_NONCE_SIZE)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(aad)
+    done = 0
+    last = 0.0
+    with src.open("rb") as fin, dest.open("wb") as fout:
+        fout.write(prefix)
+        fout.write(nonce)
+        for chunk in iter(lambda: fin.read(FILE_CRYPTO_CHUNK_SIZE), b""):
+            fout.write(encryptor.update(chunk))
+            done += len(chunk)
+            last = _print_stream_progress(label, done, total, last)
+        final = encryptor.finalize()
+        if final:
+            fout.write(final)
+        fout.write(encryptor.tag)
+    _finish_stream_progress(total)
+    return dest.stat().st_size
+
+def _read_exact(handle, size: int) -> bytes:
+    data = handle.read(size)
+    if len(data) != size:
+        raise ValueError("Encrypted file is truncated or malformed.")
+    return data
+
+def _decrypt_stream_aes_gcm(src: Path, dest: Path, key: bytes, nonce: bytes, ciphertext_offset: int, tag: bytes, aad: bytes, label: str) -> int:
+    total_size = src.stat().st_size
+    ciphertext_len = total_size - ciphertext_offset - GCM_TAG_SIZE
+    if ciphertext_len < 0:
+        raise ValueError("Encrypted file is truncated or malformed.")
+    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+    decryptor.authenticate_additional_data(aad)
+    remaining = ciphertext_len
+    done = 0
+    last = 0.0
+    with src.open("rb") as fin, dest.open("wb") as fout:
+        fin.seek(ciphertext_offset)
+        while remaining:
+            chunk = fin.read(min(FILE_CRYPTO_CHUNK_SIZE, remaining))
+            if not chunk:
+                raise ValueError("Encrypted file ended before ciphertext was complete.")
+            fout.write(decryptor.update(chunk))
+            remaining -= len(chunk)
+            done += len(chunk)
+            last = _print_stream_progress(label, done, ciphertext_len, last)
+        final = decryptor.finalize()
+        if final:
+            fout.write(final)
+    _finish_stream_progress(ciphertext_len)
+    return dest.stat().st_size
+
+def _read_stream_tag(src: Path) -> bytes:
+    total_size = src.stat().st_size
+    if total_size < GCM_TAG_SIZE:
+        raise ValueError("Encrypted file is truncated or malformed.")
+    with src.open("rb") as handle:
+        handle.seek(total_size - GCM_TAG_SIZE)
+        return _read_exact(handle, GCM_TAG_SIZE)
+
+def _decrypt_aes_stream_file(src: Path, dest: Path, key: bytes) -> int:
+    with src.open("rb") as handle:
+        magic = _read_exact(handle, len(AES_STREAM_MAGIC))
+        if magic != AES_STREAM_MAGIC:
+            raise ValueError("Not an AES-GCM stream payload.")
+        nonce = _read_exact(handle, GCM_NONCE_SIZE)
+    ciphertext_offset = len(AES_STREAM_MAGIC) + GCM_NONCE_SIZE
+    return _decrypt_stream_aes_gcm(src, dest, key, nonce, ciphertext_offset, _read_stream_tag(src), AES_STREAM_MAGIC, "Decrypting")
+
+def _decrypt_oqs_stream_file(src: Path, dest: Path, key: bytes) -> int:
+    with src.open("rb") as handle:
+        magic = _read_exact(handle, len(OQS_STREAM_MAGIC))
+        if magic != OQS_STREAM_MAGIC:
+            raise ValueError("Not an OQS hybrid stream payload.")
+        header_len = int.from_bytes(_read_exact(handle, 4), "big")
+        if header_len <= 0 or header_len > MAX_STREAM_HEADER_SIZE:
+            raise ValueError("Encrypted file has an invalid stream header.")
+        header = _read_exact(handle, header_len)
+        nonce = _read_exact(handle, GCM_NONCE_SIZE)
+    meta = json.loads(header.decode("utf-8"))
+    oqs_mod = _get_oqs_module()
+    if oqs_mod is None:
+        raise RuntimeError(f"OQS payload requires liboqs-python: {_OQS_IMPORT_ERROR}")
+    keypair = _load_or_create_oqs_keypair(key, create=False)
+    if keypair is None:
+        raise RuntimeError("OQS keypair is missing or cannot be unlocked with the current key")
+    kem_alg, _public_key, secret_key = keypair
+    if kem_alg != meta["kem_alg"]:
+        raise RuntimeError(f"OQS keypair algorithm mismatch: have {kem_alg}, need {meta['kem_alg']}")
+    with oqs_mod.KeyEncapsulation(kem_alg, secret_key) as kem:
+        shared_secret = kem.decap_secret(_b64d(meta["kem_ct"]))
+    file_key = _derive_oqs_file_key(key, shared_secret, _b64d(meta["salt"]), kem_alg)
+    ciphertext_offset = len(OQS_STREAM_MAGIC) + 4 + header_len + GCM_NONCE_SIZE
+    return _decrypt_stream_aes_gcm(src, dest, file_key, nonce, ciphertext_offset, _read_stream_tag(src), OQS_AAD_PREFIX + header, "Decrypting")
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -852,21 +1008,53 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔐 Encrypting {src} -> {dest}")
-    data = src.read_bytes()
     start = time.time()
-    enc = aes_encrypt(data, key)
-    dest.write_bytes(enc)
-    dur = time.time()-start
-    mode = "OQS hybrid" if enc.startswith(OQS_MAGIC) else "AES-GCM"
-    print(f"✅ Encrypted ({len(enc)} bytes) in {dur:.2f}s using {mode}")
+    tmp = _atomic_temp_path(dest)
+    try:
+        material = _oqs_hybrid_stream_material(key)
+        if material is not None:
+            file_key, header = material
+            prefix = OQS_STREAM_MAGIC + len(header).to_bytes(4, "big") + header
+            aad = OQS_AAD_PREFIX + header
+            mode = "OQS hybrid stream"
+        else:
+            file_key = key
+            prefix = AES_STREAM_MAGIC
+            aad = AES_STREAM_MAGIC
+            mode = "AES-GCM stream"
+        encrypted_size = _encrypt_stream_aes_gcm(src, tmp, file_key, prefix, aad, "Encrypting")
+        tmp.replace(dest)
+        dur = time.time()-start
+        print(f"✅ Encrypted ({encrypted_size} bytes) in {dur:.2f}s using {mode}")
+    except Exception:
+        _cleanup_temp(tmp)
+        raise
 
 def decrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔓 Decrypting {src} -> {dest}")
-    enc = src.read_bytes()
-    mode = "OQS hybrid" if enc.startswith(OQS_MAGIC) else "AES-GCM"
-    data = aes_decrypt(enc, key)
-    dest.write_bytes(data)
-    print(f"✅ Decrypted ({len(data)} bytes) using {mode}")
+    start = time.time()
+    tmp = _atomic_temp_path(dest)
+    try:
+        with src.open("rb") as handle:
+            magic = handle.read(max(len(OQS_STREAM_MAGIC), len(AES_STREAM_MAGIC)))
+        if magic.startswith(OQS_STREAM_MAGIC):
+            mode = "OQS hybrid stream"
+            plaintext_size = _decrypt_oqs_stream_file(src, tmp, key)
+        elif magic.startswith(AES_STREAM_MAGIC):
+            mode = "AES-GCM stream"
+            plaintext_size = _decrypt_aes_stream_file(src, tmp, key)
+        else:
+            enc = src.read_bytes()
+            mode = "OQS hybrid" if enc.startswith(OQS_MAGIC) else "AES-GCM"
+            data = aes_decrypt(enc, key)
+            tmp.write_bytes(data)
+            plaintext_size = len(data)
+        tmp.replace(dest)
+        dur = time.time()-start
+        print(f"✅ Decrypted ({plaintext_size} bytes) in {dur:.2f}s using {mode}")
+    except Exception:
+        _cleanup_temp(tmp)
+        raise
 
 async def init_db(key: bytes):
     if not DB_PATH.exists():
