@@ -4,3 +4,5 @@ models/
 chat_history.db.aes
 __pycache__/
 .codex
+.naza_colorwheel_state.json
+.naza_security_settings.json
