@@ -5,3 +5,4 @@ cryptography==47.0.1
 psutil==6.1.1
 pennylane==0.41.0
 liboqs-python==0.14.1
+litert-lm==0.11.0
