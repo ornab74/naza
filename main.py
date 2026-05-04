@@ -1372,18 +1372,43 @@ def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk
 def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -> str:
     entropy_text = "entropic_score=unknown"
     integrity_text = "local_interference=unknown"
+    multi_node_text = "multi_node=unknown"
+    defense_capsule = "defense_capsule=unknown"
+    colorwheel_text = "colorwheel=unknown"
+    metrics_line = "sys_metrics: disabled"
     input_checksum = hashlib.sha256(json.dumps(public_scan_input(data), sort_keys=True).encode("utf-8")).hexdigest()[:16]
     if include_system_entropy:
         metrics = collect_resilient_system_metrics()
         rgb = metrics_to_rgb(metrics)
         score = enhanced_entropic_score(rgb, metrics)
+        surface = simulate_multi_node_interference(data, metrics)
         entropy_text = entropic_summary_text(score)
         integrity_text = scanner_integrity_text(metrics)
+        multi_node_text = multi_node_surface_text(surface)
+        defense_capsule = defense_capsule_text(data, metrics, surface)
+        colorwheel_text = colorwheel_marker(
+            "scanner-prompt",
+            {
+                "input": public_scan_input(data),
+                "interference": metrics.get("interference_score", 0.0),
+                "surface": surface.get("score", 0.0),
+            },
+        )
         data["_scanner_interference_score"] = float(metrics.get("interference_score", 0.0))
         data["_scanner_integrity"] = integrity_text
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f},interference={interference:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc",0.0), interference=metrics.get("interference_score",0.0))
-    else:
-        metrics_line = "sys_metrics: disabled"
+        data["_scanner_multi_node"] = multi_node_text
+        data["_scanner_defense_capsule"] = defense_capsule
+        data["_scanner_colorwheel"] = colorwheel_text
+        data["_scanner_defense_passes"] = int(surface.get("passes", 1))
+        data["_scanner_vector_scores"] = surface.get("vector_scores", {})
+        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f},interference={interference:.2f}".format(
+            cpu=metrics.get("cpu", 0.0),
+            mem=metrics.get("mem", 0.0),
+            load1=metrics.get("load1", 0.0),
+            temp=metrics.get("temp", 0.0),
+            proc=metrics.get("proc", 0.0),
+            interference=metrics.get("interference_score", 0.0),
+        )
     tpl = (
 f"You are an advanced coherant tuned matric surface Hypertime Nanobot specialized Road Risk Classification AI trained to evaluate real-world driving scenes.\n"
 f"Analyze and Triple Check for validating accuracy the environmental and sensor data and determine the overall road risk level.\n"
@@ -1395,6 +1420,9 @@ f"Location: {data.get('location','unspecified location')}\n"
 f"{metrics_line}\n"
 f"Quantum State: {entropy_text}\n"
 f"Sensor Integrity: {integrity_text}\n"
+f"Multi-node Surface: {multi_node_text}\n"
+f"Defense Capsule: {defense_capsule}\n"
+f"Colorwheel Entropy Machine: {colorwheel_text}\n"
 f"Input Checksum: {input_checksum}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
@@ -1402,6 +1430,8 @@ f"- Think through all scene factors internally but do not show reasoning.\n"
 f"- Evaluate the available road location context holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
 f"- Treat unstable, suspiciously flat, spoofed, or high-pressure local metrics as possible interference.\n"
+f"- Use only abstract nearby-device geometry and runtime anomalies; ignore identity, ethnicity, appearance, age, or protected traits.\n"
+f"- Treat the colorwheel entropy machine as a trace-scrambling selector that makes repeated outputs harder to pattern-learn.\n"
 f"- Always verify current status on-site; this label is decision support, not a replacement for direct inspection.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
@@ -1412,8 +1442,10 @@ f"2) Average repeated metric samples and reject outlier readings.\n"
 f"3) Map road location risk cues -> discrete label using conservative thresholds.\n"
 f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
 f"5) Account for local interference from EM noise, power instability, thermal pressure, process spikes, or metric spoofing.\n"
-f"6) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
-f"7) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
+f"6) Use the abstract multi-node surface to choose conservative internal confidence if coordinated-device conditions are plausible.\n"
+f"7) Use colorwheel entropy state to decorrelate model/pass/prompt timing without exposing hidden reasoning.\n"
+f"8) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
+f"9) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
 f"[/action]\n\n"
 f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     )
@@ -1425,71 +1457,250 @@ def allocate_temp_db_path() -> Path:
     return Path(path)
 
 def header(status:dict):
-    s = f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} | Crypto: {oqs_crypto_status()} "
+    selected = status.get("selected_model", read_selected_model_profile()) if status else read_selected_model_profile()
+    mode = status.get("model_selection_mode", read_model_selection_mode()) if status else read_model_selection_mode()
+    settings = status.get("security_settings", read_security_settings()) if status else read_security_settings()
+    disabled = len(settings.get("disabled_model_ids", []))
+    s = (
+        f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | "
+        f"Pick: {selected['name']} | Mode: {mode} | Defense: {settings.get('defense_profile')} | "
+        f"Disabled: {disabled} | Crypto: {oqs_crypto_status()} "
+    )
     print(color(s.center(terminal_width(), '─'), fg=35, bold=True))
 
 def model_manager(state:dict):
     options = [
-        "Download model from remote repo (httpx)",
-        "Verify plaintext model hash (compute SHA256)",
-        "Encrypt plaintext model -> .aes",
-        "Decrypt .aes -> plaintext (temporary)",
-        "Delete plaintext model",
+        "Select active model",
+        "Toggle selection mode fixed/entropy",
+        "Download active model from remote repo",
+        "Verify active plaintext model hash",
+        "Encrypt active plaintext model -> .aes",
+        "Decrypt active .aes -> plaintext (temporary)",
+        "Delete active plaintext model",
         "Back",
     ]
     while True:
+        profile = state.get("selected_model", read_selected_model_profile())
+        settings = state.get("security_settings", read_security_settings())
         idx = choose_menu(
             "Model Manager",
             options,
             status=state,
             footer=[
-                "Manage the local GGUF model, verify integrity, and protect plaintext copies.",
-                "Use ↑↓ / `j``k` / number keys, Enter to select.",
+                f"Active: {model_label(profile)}",
+                f"Selection mode: {state.get('model_selection_mode', read_model_selection_mode())}",
+                f"Enabled models: {len(enabled_model_profiles(settings))}/{len(MODEL_PROFILES)}",
+                "Disabled models are excluded from chat, scans, and entropy-random selection.",
             ],
         )
         choice = str(idx + 1)
-        if choice=="1":
-            if MODEL_PATH.exists():
-                if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
+        profile = state.get("selected_model", read_selected_model_profile())
+        model_path = model_path_for(profile)
+        encrypted_path = encrypted_model_path_for(profile)
+        if choice == "1":
+            selected_idx = choose_menu(
+                "Select Model",
+                [("[enabled] " if is_model_enabled(p, settings) else "[disabled] ") + model_label(p) for p in MODEL_PROFILES],
+                status=state,
+            )
+            selected = MODEL_PROFILES[selected_idx]
+            if not is_model_enabled(selected, settings):
+                print("That model is disabled in Settings. Enable it before selecting it.")
+                input("Enter...")
+                continue
+            state["selected_model"] = selected
+            write_selected_model_profile(selected)
+        elif choice == "2":
+            mode = state.get("model_selection_mode", read_model_selection_mode())
+            mode = "fixed" if mode == "entropy" else "entropy"
+            write_model_selection_mode(mode)
+            state["model_selection_mode"] = mode
+        elif choice == "3":
+            if model_path.exists():
+                if input(f"Plaintext model exists at {model_path}; overwrite? (y/N): ").strip().lower() != "y":
+                    continue
             try:
-                url = MODEL_REPO + MODEL_FILE
-                sha = download_model_httpx(url, MODEL_PATH, show_progress=True, timeout=None, expected_sha=EXPECTED_HASH)
-                print(f"Downloaded to {MODEL_PATH}")
+                url = profile["repo"] + profile["file"]
+                sha = download_model_httpx(url, model_path, show_progress=True, timeout=None, expected_sha=profile.get("expected_hash"))
+                print(f"Downloaded to {model_path}")
                 print(f"Computed SHA256: {sha}")
-                if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower()!='n':
-                    encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-                    print(f"Encrypted -> {ENCRYPTED_MODEL}")
-                    if input("Remove plaintext model? (Y/n): ").strip().lower()!='n':
-                        MODEL_PATH.unlink(); print("Plaintext removed.")
+                if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower() != "n":
+                    encrypt_file(model_path, encrypted_path, state['key'])
+                    print(f"Encrypted -> {encrypted_path}")
+                    if input("Remove plaintext model? (Y/n): ").strip().lower() != "n":
+                        model_path.unlink(); print("Plaintext removed.")
             except Exception as e:
                 print(f"Download failed: {e}")
             input("Enter to continue...")
-        elif choice=="2":
-            if not MODEL_PATH.exists(): print("No plaintext model found.")
-            else: print(f"SHA256: {sha256_file(MODEL_PATH)}")
+        elif choice == "4":
+            if not model_path.exists():
+                print("No plaintext model found.")
+            else:
+                sha = sha256_file(model_path)
+                print(f"SHA256: {sha}")
+                expected = profile.get("expected_hash")
+                if expected:
+                    print("Hash matches expected." if sha.lower() == expected.lower() else f"Hash mismatch; expected {expected}")
             input("Enter to continue...")
-        elif choice=="3":
-            if not MODEL_PATH.exists(): print("No plaintext model to encrypt."); input("Enter..."); continue
-            encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-            if input("Remove plaintext? (Y/n): ").strip().lower()!='n':
-                MODEL_PATH.unlink(); print("Removed plaintext.")
+        elif choice == "5":
+            if not model_path.exists():
+                print("No plaintext model to encrypt."); input("Enter..."); continue
+            encrypt_file(model_path, encrypted_path, state['key'])
+            if input("Remove plaintext? (Y/n): ").strip().lower() != "n":
+                model_path.unlink(); print("Removed plaintext.")
             input("Enter...")
-        elif choice=="4":
-            if not ENCRYPTED_MODEL.exists(): print("No .aes model present.")
-            else: decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+        elif choice == "6":
+            if not encrypted_path.exists():
+                print("No .aes model present.")
+            else:
+                decrypt_file(encrypted_path, model_path, state['key'])
             input("Enter...")
-        elif choice=="5":
-            if MODEL_PATH.exists():
-                if input(f"Delete {MODEL_PATH}? (y/N): ").strip().lower()=="y": MODEL_PATH.unlink(); print("Deleted.")
-            else: print("No plaintext model.")
+        elif choice == "7":
+            if model_path.exists():
+                if input(f"Delete {model_path}? (y/N): ").strip().lower() == "y":
+                    model_path.unlink(); print("Deleted.")
+            else:
+                print("No plaintext model.")
             input("Enter...")
-        elif choice=="6": return
-        else: print("Invalid.")
+        else:
+            return
+
+def settings_flow(state:dict):
+    while True:
+        settings = state.get("security_settings", read_security_settings())
+        footer = [
+            f"Profile: {settings.get('defense_profile')}",
+            f"Defense voting: {'on' if settings.get('defense_voting') else 'off'}",
+            f"Metric samples: {settings.get('metric_samples')} | Max passes: {settings.get('max_defense_passes')} | Noise width: {settings.get('noise_width')} | Jitter: {settings.get('jitter_scale')}",
+            f"Colorwheel: {'on' if settings.get('colorwheel_enabled') else 'off'} | Spins: {settings.get('colorwheel_spins')} | Rings: {settings.get('colorwheel_rings')} | ML scramble: {'on' if settings.get('ml_trace_scramble') else 'off'}",
+            f"Enabled models: {len(enabled_model_profiles(settings))}/{len(MODEL_PROFILES)}",
+        ]
+        idx = choose_menu(
+            "Settings",
+            [
+                "Model enable / disable controls",
+                "Defense profile",
+                "Toggle defense voting",
+                "Toggle colorwheel entropy",
+                "Toggle ML trace scramble",
+                "Set colorwheel spins",
+                "Set colorwheel rings",
+                "Set max defense passes",
+                "Set metric samples",
+                "Set noise width",
+                "Run colorwheel spin test",
+                "Reset settings",
+                "Back",
+            ],
+            status=state,
+            footer=footer,
+        )
+        if idx == 0:
+            while True:
+                settings = state.get("security_settings", read_security_settings())
+                options = [("[enabled] " if is_model_enabled(profile, settings) else "[disabled] ") + model_label(profile) for profile in MODEL_PROFILES] + ["Back"]
+                pick = choose_menu("Model Controls", options, status=state, footer=["Disabled models are excluded from chat, scans, and entropy-random selection."])
+                if pick >= len(MODEL_PROFILES):
+                    break
+                profile = MODEL_PROFILES[pick]
+                disabled = list(settings.get("disabled_model_ids", []))
+                if profile["id"] in disabled:
+                    disabled.remove(profile["id"])
+                else:
+                    if len(disabled) >= len(MODEL_PROFILES) - 1:
+                        print("At least one model must stay enabled.")
+                        input("Enter...")
+                        continue
+                    disabled.append(profile["id"])
+                settings["disabled_model_ids"] = disabled
+                settings = normalize_security_settings(settings)
+                if not is_model_enabled(state.get("selected_model", read_selected_model_profile()), settings):
+                    state["selected_model"] = first_enabled_model_profile(settings)
+                    write_selected_model_profile(state["selected_model"])
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 1:
+            names = list(DEFENSE_PROFILE_PRESETS.keys())
+            pick = choose_menu("Defense Profile", [name.title() for name in names], status=state)
+            settings.update(DEFENSE_PROFILE_PRESETS[names[pick]])
+            settings["defense_profile"] = names[pick]
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 2:
+            settings["defense_voting"] = not bool(settings.get("defense_voting", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 3:
+            settings["colorwheel_enabled"] = not bool(settings.get("colorwheel_enabled", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 4:
+            settings["ml_trace_scramble"] = not bool(settings.get("ml_trace_scramble", True))
+            settings = normalize_security_settings(settings)
+            write_security_settings(settings)
+            state["security_settings"] = settings
+        elif idx == 5:
+            value = input("Colorwheel spins (16-256): ").strip()
+            if value.isdigit():
+                settings["colorwheel_spins"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 6:
+            value = input("Colorwheel rings (6-24): ").strip()
+            if value.isdigit():
+                settings["colorwheel_rings"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 7:
+            value = input("Max defense passes (1-5): ").strip()
+            if value.isdigit():
+                settings["max_defense_passes"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 8:
+            value = input("Metric samples (3-13): ").strip()
+            if value.isdigit():
+                settings["metric_samples"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 9:
+            value = input("Noise thread width (1-4): ").strip()
+            if value.isdigit():
+                settings["noise_width"] = int(value)
+                settings = normalize_security_settings(settings)
+                write_security_settings(settings)
+                state["security_settings"] = settings
+        elif idx == 10:
+            marker = render_colorwheel_spinner("Settings colorwheel test", frames=24)
+            print(marker)
+            input("Enter...")
+        elif idx == 11:
+            settings = normalize_security_settings()
+            write_security_settings(settings)
+            state["security_settings"] = settings
+            state["selected_model"] = first_enabled_model_profile(settings)
+            write_selected_model_profile(state["selected_model"])
+        else:
+            return
 
 async def chat_session(state:dict):
-    if not ENCRYPTED_MODEL.exists(): print("No encrypted model found. Please download & encrypt first."); input("Enter..."); return
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    profile = entropy_select_model_profile(state, purpose="chat")
+    model_path = model_path_for(profile)
+    encrypted_path = encrypted_model_path_for(profile)
+    if not encrypted_path.exists():
+        print(f"No encrypted model found for {model_label(profile)}. Please download & encrypt it first.")
+        input("Enter...")
+        return
+    decrypt_file(encrypted_path, model_path, state['key'])
     loop = asyncio.get_running_loop()
+    runtime = None
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
             render_screen(
@@ -1498,13 +1709,13 @@ async def chat_session(state:dict):
                 "Live Chat",
                 "Encrypted model session with local history logging.",
                 "Boot Sequence",
-                ["Decrypting model payload...", "Loading llama.cpp runtime...", "Preparing secure chat loop..."],
+                [f"Decrypting model payload for {model_label(profile)}...", f"Loading {MODEL_RUNTIME_NAMES.get(profile.get('runtime'), profile.get('runtime', 'unknown'))} runtime...", "Preparing secure chat loop..."],
             )
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            runtime = await loop.run_in_executor(ex, load_model_runtime_blocking, profile, model_path)
         except Exception as e:
             print(f"Failed to load: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+            if model_path.exists():
+                try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
                 except Exception: pass
             input("Enter..."); return
         state['model_loaded']=True
@@ -1516,7 +1727,7 @@ async def chat_session(state:dict):
                 "Live Chat",
                 "Ask questions, review local history, or exit back to the menu.",
                 "Commands",
-                ["/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
+                [f"Model: {model_label(profile)}", "/history  Show the last 10 messages", "/exit     Leave chat and re-encrypt the model"],
             )
             print("Type /exit to return, /history to show last 10 messages.")
             while True:
@@ -1528,29 +1739,31 @@ async def chat_session(state:dict):
                     for r in rows: print(f"[{r[0]}] {r[1]}\nQ: {r[2]}\nA: {r[3]}\n{'-'*30}")
                     continue
                 def gen(p):
-                    out = llm(p, max_tokens=256, temperature=0.7)
-                    text = ""
-                    if isinstance(out, dict):
-                        try: text = out.get("choices",[{"text":""}])[0].get("text","")
-                        except Exception: text = out.get("text","")
-                    else: text = str(out)
-                    text = (text or "").strip()
-                    text = text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
-                    return text
+                    text = runtime.generate(p, max_tokens=256, temperature=0.7)
+                    return (text or "").replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face", "").strip()
                 print("🤖 Thinking...")
                 result = await loop.run_in_executor(ex, gen, prompt)
                 print("\nModel:\n"+result+"\n")
-                await log_interaction(prompt, result, state['key'])
+                await log_interaction(f"[{model_label(profile)}] {prompt}", result, state['key'])
         finally:
-            try: del llm
-            except Exception: pass
+            try:
+                if runtime is not None:
+                    runtime.close()
+            except Exception:
+                pass
             print("Re-encrypting model and removing plaintext...")
-            try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink(); state['model_loaded']=False
+            try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink(); state['model_loaded']=False
             except Exception as e: print(f"Cleanup failed: {e}")
             input("Enter...")
 
 async def road_scanner_flow(state:dict):
-    if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
+    profile = entropy_select_model_profile(state, purpose="road-scan")
+    model_path = model_path_for(profile)
+    encrypted_path = encrypted_model_path_for(profile)
+    if not encrypted_path.exists():
+        print(f"No encrypted model found for {model_label(profile)}.")
+        input("Enter...")
+        return
     data={}
     render_screen(
         state,
@@ -1564,50 +1777,60 @@ async def road_scanner_flow(state:dict):
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    print("Spinning colorwheel entropy selector...")
+    data["_scanner_colorwheel_spinner"] = render_colorwheel_spinner("Colorwheel entropy selector")
+    decrypt_file(encrypted_path, model_path, state['key'])
     loop = asyncio.get_running_loop()
+    runtime = None
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            runtime = await loop.run_in_executor(ex, load_model_runtime_blocking, profile, model_path)
         except Exception as e:
             print(f"Model load failed: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+            if model_path.exists():
+                try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
                 except Exception: pass
             input("Enter..."); return
+        def extract_label(text: str) -> str:
+            text = (text or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face", "")
+            candidate = text.split()
+            label = candidate[0].capitalize() if candidate else ""
+            if label not in ("Low", "Medium", "High"):
+                lowered = text.lower()
+                if "low" in lowered: label = "Low"
+                elif "medium" in lowered: label = "Medium"
+                elif "high" in lowered: label = "High"
+                else: label = "Medium"
+            return apply_interference_bias(label, float(data.get("_scanner_interference_score", 0.0)))
         def gen_direct(p):
             add_interference_jitter(40)
-            out = llm(p, max_tokens=128, temperature=0.2)
-            if isinstance(out, dict):
-                try: text = out.get("choices",[{"text":""}])[0].get("text","")
-                except Exception: text = out.get("text","")
-            else: text = str(out)
-            text = (text or "").strip()
-            return text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
-        if gen_choice == "3":
-            print("Scanning (single-call)...")
-            result = await loop.run_in_executor(ex, gen_direct, prompt)
-        else:
-            punkd_profile = "balanced" if gen_choice=="1" else "conservative"
-            print("Scanning with chunked generation (this may take a moment)...")
-            def run_chunked():
-                add_interference_jitter(40)
-                return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-            result = await loop.run_in_executor(ex, run_chunked)
-        text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-        candidate = text.split()
-        label = candidate[0].capitalize() if candidate else ""
-        if label not in ("Low","Medium","High"):
-            lowered = text.lower()
-            if "low" in lowered: label = "Low"
-            elif "medium" in lowered: label = "Medium"
-            elif "high" in lowered: label = "High"
-            else: label = "Medium"
-        label = apply_interference_bias(label, float(data.get("_scanner_interference_score", 0.0)))
+            return runtime.generate(p, max_tokens=128, temperature=0.2).strip()
+        def run_once(pass_idx: int, total_passes: int):
+            pass_prompt = augment_prompt_with_defense_pass(prompt, data, pass_idx, total_passes)
+            if gen_choice == "3":
+                return gen_direct(pass_prompt)
+            punkd_profile = "balanced" if gen_choice == "1" else "conservative"
+            add_interference_jitter(40)
+            return chunked_generate(llm=runtime, prompt=pass_prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
+        total_passes = defense_pass_count(data)
+        print(f"Scanning with {total_passes} defense pass{'es' if total_passes != 1 else ''} using {model_label(profile)}...")
+        vote_labels = []
+        outputs = []
+        for pass_idx in range(total_passes):
+            result = await loop.run_in_executor(ex, run_once, pass_idx, total_passes)
+            outputs.append(result)
+            vote_labels.append(extract_label(result))
+        text = outputs[0] if outputs else ""
+        label = majority_risk_label(vote_labels)
         while True:
             result_lines = [
                 f"Classification: {label}",
                 f"Generator: {'direct' if gen_choice == '3' else 'chunked'}",
+                f"Model: {model_label(profile)}",
+                f"Votes: {', '.join(vote_labels) if vote_labels else 'none'}",
+                f"Multi-node: {data.get('_scanner_multi_node', 'unknown')}",
+                f"Colorwheel: {data.get('_scanner_colorwheel', 'unknown')}",
+                f"Defense: {data.get('_scanner_defense_capsule', 'unknown')}",
                 "",
                 "Generated output:",
             ]
@@ -1627,36 +1850,72 @@ async def road_scanner_flow(state:dict):
                 v = input(f"{k} [{data[k]}]: ").strip()
                 if v: data[k]=v
             prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-            print("Re-scanning...")
-            if gen_choice == "3": result = await loop.run_in_executor(ex, gen_direct, prompt)
-            else:
-                def run_chunked2():
-                    add_interference_jitter(40)
-                    return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-                result = await loop.run_in_executor(ex, run_chunked2)
-            text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-            candidate = text.split()
-            label = candidate[0].capitalize() if candidate else ""
-            if label not in ("Low","Medium","High"):
-                lowered = text.lower()
-                if "low" in lowered: label = "Low"
-                elif "medium" in lowered: label = "Medium"
-                elif "high" in lowered: label = "High"
-                else: label = "Medium"
-            label = apply_interference_bias(label, float(data.get("_scanner_interference_score", 0.0)))
+            print("Spinning colorwheel entropy selector...")
+            data["_scanner_colorwheel_spinner"] = render_colorwheel_spinner("Colorwheel entropy selector")
+            total_passes = defense_pass_count(data)
+            print(f"Re-scanning with {total_passes} defense pass{'es' if total_passes != 1 else ''}...")
+            vote_labels = []
+            outputs = []
+            for pass_idx in range(total_passes):
+                result = await loop.run_in_executor(ex, run_once, pass_idx, total_passes)
+                outputs.append(result)
+                vote_labels.append(extract_label(result))
+            text = outputs[0] if outputs else ""
+            label = majority_risk_label(vote_labels)
         if ch in ("2","3"):
             try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
             except Exception as e: print(f"Failed to log: {e}")
         if ch=="2":
-            outp = {"input": public_scan_input(data), "prompt": prompt, "result": label, "scanner_integrity": data.get("_scanner_integrity", "unknown"), "crypto": oqs_crypto_status(), "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+            outp = {
+                "input": public_scan_input(data),
+                "prompt": prompt,
+                "result": label,
+                "model": model_label(profile),
+                "scanner_integrity": data.get("_scanner_integrity", "unknown"),
+                "multi_node": data.get("_scanner_multi_node", "unknown"),
+                "colorwheel": data.get("_scanner_colorwheel", "unknown"),
+                "colorwheel_spinner": data.get("_scanner_colorwheel_spinner", "unknown"),
+                "defense_capsule": data.get("_scanner_defense_capsule", "unknown"),
+                "defense_votes": vote_labels,
+                "vector_scores": data.get("_scanner_vector_scores", {}),
+                "crypto": oqs_crypto_status(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
             fn = input("Filename to save JSON (default road_scan.json): ").strip() or "road_scan.json"
             Path(fn).write_text(json.dumps(outp, indent=2)); print(f"Saved {fn}")
-        try: del llm
+        try:
+            if runtime is not None:
+                runtime.close()
         except Exception: pass
         print("Re-encrypting model and removing plaintext...")
-        try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
+        try: encrypt_file(model_path, encrypted_path, state['key']); model_path.unlink()
         except Exception as e: print(f"Cleanup error: {e}")
         input("Enter to return...")
+
+def defense_lab_flow(state:dict):
+    data = {"location": "defense lab"}
+    metrics = collect_resilient_system_metrics()
+    surface = simulate_multi_node_interference(data, metrics)
+    capsule = defense_capsule_text(data, metrics, surface)
+    colorwheel = render_colorwheel_spinner("Defense lab colorwheel")
+    lines = [
+        capsule,
+        colorwheel,
+        scanner_integrity_text(metrics),
+        multi_node_surface_text(surface),
+        "Vector scores: " + json.dumps(surface.get("vector_scores", {}), sort_keys=True),
+        "Recommendations:",
+    ]
+    lines.extend("- " + rec for rec in defense_recommendations(surface))
+    render_screen(
+        state,
+        "plain",
+        "Side-channel Defense Lab",
+        "Local anomaly, colorwheel, and defense-pass diagnostics.",
+        "Defense Lab",
+        lines,
+    )
+    input("Enter to return...")
 
 async def db_viewer_flow(state:dict):
     if not DB_PATH.exists(): print("No DB found."); input("Enter..."); return
@@ -1745,7 +2004,7 @@ def safe_cleanup(paths:List[Path]):
         except Exception: pass
 
 def main_menu_loop(state:dict):
-    options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
+    options = ["Model Manager", "Settings", "Chat with model", "Road Scanner", "Side-channel Defense Lab", "View chat history", "Rekey / Rotate key", "Exit"]
     while True:
         idx = max(0, min(0, len(options) - 1))
         flush_stdin_buffer()
@@ -1780,8 +2039,10 @@ def main_menu_loop(state:dict):
                     pass
         choice = options[idx]
         if choice == "Model Manager": model_manager(state)
+        elif choice == "Settings": settings_flow(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
         elif choice == "Road Scanner": asyncio.run(road_scanner_flow(state))
+        elif choice == "Side-channel Defense Lab": defense_lab_flow(state)
         elif choice == "View chat history": asyncio.run(db_viewer_flow(state))
         elif choice == "Rekey / Rotate key": rekey_flow(state)
         elif choice == "Exit": print("Goodbye."); return
@@ -1789,7 +2050,12 @@ def main_menu_loop(state:dict):
 def main():
     try: key = ensure_key_interactive()
     except Exception: key = get_or_create_key()
-    state = {"key": key, "model_loaded": False}
+    settings = read_security_settings()
+    selected = read_selected_model_profile()
+    if not is_model_enabled(selected, settings):
+        selected = first_enabled_model_profile(settings)
+        write_selected_model_profile(selected)
+    state = {"key": key, "model_loaded": False, "selected_model": selected, "model_selection_mode": read_model_selection_mode(), "security_settings": settings}
     try:
         asyncio.run(init_db(state['key']))
     except Exception: pass
