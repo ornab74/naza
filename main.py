@@ -1,7 +1,7 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, base64, importlib.util, hmac, sqlite3
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, base64, importlib, importlib.util, hmac, sqlite3
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Tuple, Callable, Dict
+from typing import Any, Optional, List, Tuple, Callable, Dict
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
@@ -9,13 +9,16 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from llama_cpp import Llama
 
+psutil: Any = None
+qml: Any = None
+pnp: Any = None
 try:
-    import psutil
+    psutil = importlib.import_module("psutil")
 except Exception:
-    psutil = None
+    pass
 try:
-    import pennylane as qml
-    from pennylane import numpy as pnp
+    qml = importlib.import_module("pennylane")
+    pnp = importlib.import_module("pennylane.numpy")
 except Exception:
     qml = None
     pnp = None
@@ -92,9 +95,12 @@ def encrypted_model_path_for(profile: dict) -> Path:
     path = model_path_for(profile)
     return path.with_suffix(path.suffix + ".aes")
 
+def model_runtime_name(profile: dict) -> str:
+    runtime_id = str(profile.get("runtime", "unknown"))
+    return MODEL_RUNTIME_NAMES.get(runtime_id, runtime_id)
+
 def model_label(profile: dict) -> str:
-    runtime = MODEL_RUNTIME_NAMES.get(profile.get("runtime"), profile.get("runtime", "unknown"))
-    return f"{profile['name']} [{runtime}]"
+    return f"{profile['name']} [{model_runtime_name(profile)}]"
 
 def set_app_key(key: bytes) -> None:
     global _APP_KEY
@@ -616,8 +622,17 @@ def menu_lines(options: List[str], selected_idx: int, footer: Optional[List[str]
         lines.extend(footer)
     return lines
 
-def choose_menu(title: str, options: List[str], status: Optional[dict] = None, footer: Optional[List[str]] = None, default_idx: int = 0, header: Optional[List[str]] = None) -> int:
+def choose_menu(
+    title: str,
+    options: List[str],
+    status: Optional[dict] = None,
+    footer: Optional[List[str]] = None,
+    default_idx: int = 0,
+    header: Optional[List[str]] = None,
+    select_keys: Optional[set] = None,
+) -> int:
     idx = max(0, min(default_idx, len(options) - 1))
+    select_keys = select_keys or set()
     flush_stdin_buffer()
     while True:
         render_screen(status, "plain", title, "Arrow keys, number shortcuts, and clean focus-safe input.", title, menu_lines(options, idx, footer, header))
@@ -633,6 +648,9 @@ def choose_menu(title: str, options: List[str], status: Optional[dict] = None, f
         elif name == "other":
             try:
                 raw = ch.decode(errors="ignore").strip()
+                if raw in select_keys:
+                    flush_stdin_buffer()
+                    return idx
                 if raw.isdigit():
                     choice = int(raw)
                     if 1 <= choice <= len(options):
@@ -1244,12 +1262,12 @@ class LocalModelRuntime:
     def __init__(self, profile: dict, model_path: Path):
         self.profile = profile
         self.model_path = model_path
-        self.runtime = profile.get("runtime", "llama_cpp")
-        self.llm = None
-        self.engine_ctx = None
-        self.engine = None
-        self.conversation_ctx = None
-        self.conversation = None
+        self.runtime = str(profile.get("runtime", "llama_cpp"))
+        self.llm: Any = None
+        self.engine_ctx: Any = None
+        self.engine: Any = None
+        self.conversation_ctx: Any = None
+        self.conversation: Any = None
 
     def load(self):
         if self.runtime == "litert_lm":
@@ -1271,8 +1289,9 @@ class LocalModelRuntime:
     def close(self):
         for ctx in (self.conversation_ctx, self.engine_ctx):
             try:
-                if hasattr(ctx, "__exit__"):
-                    ctx.__exit__(None, None, None)
+                exit_fn = getattr(ctx, "__exit__", None)
+                if callable(exit_fn):
+                    exit_fn(None, None, None)
             except Exception:
                 pass
         self.conversation = None
@@ -1285,17 +1304,23 @@ class LocalModelRuntime:
                 raise RuntimeError("LiteRT-LM conversation is not loaded")
             response = self.conversation.send_message(prompt)
             return extract_litert_text(response)
+        if self.llm is None:
+            raise RuntimeError("llama.cpp model is not loaded")
         return extract_llama_text(self.llm(prompt, max_tokens=max_tokens, temperature=temperature))
 
     def __call__(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2):
         return {"choices": [{"text": self.generate(prompt, max_tokens=max_tokens, temperature=temperature)}]}
 
-def extract_llama_text(out) -> str:
+def extract_llama_text(out: object) -> str:
     if isinstance(out, dict):
-        try:
-            return out.get("choices", [{"text": ""}])[0].get("text", "")
-        except Exception:
-            return out.get("text", "")
+        choices = out.get("choices")
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, dict):
+                text = first_choice.get("text")
+                return "" if text is None else str(text)
+        text = out.get("text")
+        return "" if text is None else str(text)
     return str(out)
 
 def extract_litert_text(response) -> str:
@@ -1328,7 +1353,8 @@ def collect_system_metrics() -> Dict[str, float]:
         except Exception:
             load1 = cpu
         try:
-            temps_map = psutil.sensors_temperatures()
+            sensors_temperatures = getattr(psutil, "sensors_temperatures", None)
+            temps_map = sensors_temperatures() if callable(sensors_temperatures) else None
             if temps_map:
                 first = next(iter(temps_map.values()))[0].current
                 temp = max(0.0, min(1.0, (first - 20.0) / 70.0))
@@ -1504,6 +1530,18 @@ def normalize_risk_label(text: str) -> str:
 def _clamp01(value: float) -> float:
     return float(max(0.0, min(1.0, value)))
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 def _parse_int(value, default: int = 0, low: int = 0, high: int = 12) -> int:
     try:
         found = re.search(r"-?\d+", str(value))
@@ -1578,7 +1616,11 @@ def simulate_multi_node_interference(data: dict, metrics: Dict[str, float], tria
 
 def multi_node_surface_text(surface: Dict[str, object]) -> str:
     return "multi_node={score:.2f} (level={level}, nodes={nodes}, topology={topology}, passes={passes})".format(
-        score=float(surface.get("score", 0.0)), level=surface.get("level", "unknown"), nodes=int(surface.get("node_count", 0)), topology=surface.get("topology", "unknown"), passes=int(surface.get("passes", 1))
+        score=_safe_float(surface.get("score"), 0.0),
+        level=surface.get("level", "unknown"),
+        nodes=_safe_int(surface.get("node_count"), 0),
+        topology=surface.get("topology", "unknown"),
+        passes=_safe_int(surface.get("passes"), 1),
     )
 
 def defense_capsule_text(data: dict, metrics: Dict[str, float], surface: Dict[str, object]) -> str:
@@ -1589,8 +1631,8 @@ def defense_pass_count(data: dict) -> int:
     settings = read_security_settings()
     if not settings.get("defense_voting", True):
         return 1
-    configured = max(1, min(5, int(float(data.get("_scanner_defense_passes", 1) or 1))))
-    return max(1, min(int(settings.get("max_defense_passes", 5)), configured))
+    configured = max(1, min(5, _safe_int(data.get("_scanner_defense_passes"), 1)))
+    return max(1, min(_safe_int(settings.get("max_defense_passes"), 5), configured))
 
 def majority_risk_label(labels: List[str]) -> str:
     counts = {label: labels.count(label) for label in ("Low", "Medium", "High")}
@@ -1608,8 +1650,8 @@ def augment_prompt_with_defense_pass(prompt: str, data: dict, pass_idx: int, tot
     return prompt + f"\n\n[defense_pass]\nindex={pass_idx + 1}/{total_passes}; nonce={marker}; colorwheel_trace=private; vote_privately=true\n[/defense_pass]"
 
 def defense_recommendations(surface: Dict[str, object]) -> List[str]:
-    score = float(surface.get("score", 0.0))
-    passes = int(surface.get("passes", 1))
+    score = _safe_float(surface.get("score"), 0.0)
+    passes = _safe_int(surface.get("passes"), 1)
     recs = [f"Run {passes} randomized inference pass{'es' if passes != 1 else ''} and majority-vote the label.", "Keep scanner inputs about devices/signals, not personal traits.", "Verify directly on site if conditions feel unsafe or confusing."]
     if score >= 0.35:
         recs.extend(["Disable nonessential radios before scanning.", "Use a cooldown and re-run from a quieter location if possible.", "Export encrypted defense logs for later comparison."])
@@ -1658,7 +1700,7 @@ def punkd_apply(prompt_text: str, token_weights: Dict[str,float], profile: str =
     patched = prompt_text + "\n\n[PUNKD_MARKERS] " + markers
     return patched, multiplier
 
-def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk_tokens: int = 64, base_temperature: float = 0.2, punkd_profile: str = "balanced", streaming_callback: Optional[Callable[[str], None]] = None) -> str:
+def chunked_generate(llm: Callable[..., object], prompt: str, max_total_tokens: int = 256, chunk_tokens: int = 64, base_temperature: float = 0.2, punkd_profile: str = "balanced", streaming_callback: Optional[Callable[[str], None]] = None) -> str:
     assembled = ""
     cur_prompt = prompt
     token_weights = punkd_analyze(prompt, top_n=16)
@@ -1668,14 +1710,7 @@ def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk
         patched_prompt, mult = punkd_apply(cur_prompt, token_weights, profile=punkd_profile)
         temp = max(0.01, min(2.0, base_temperature * mult))
         out = llm(patched_prompt, max_tokens=chunk_tokens, temperature=temp)
-        text = ""
-        if isinstance(out, dict):
-            try: text = out.get("choices",[{"text":""}])[0].get("text","")
-            except Exception:
-                text = out.get("text","") if isinstance(out, dict) else ""
-        else:
-            try: text = str(out)
-            except Exception: text = ""
+        text = extract_llama_text(out)
         text = (text or "").strip()
         if not text: break
         overlap = 0
@@ -1723,7 +1758,7 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
         data["_scanner_multi_node"] = multi_node_text
         data["_scanner_defense_capsule"] = defense_capsule
         data["_scanner_colorwheel"] = colorwheel_text
-        data["_scanner_defense_passes"] = int(surface.get("passes", 1))
+        data["_scanner_defense_passes"] = _safe_int(surface.get("passes"), 1)
         data["_scanner_vector_scores"] = surface.get("vector_scores", {})
         metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f},interference={interference:.2f}".format(
             cpu=metrics.get("cpu", 0.0),
@@ -1826,6 +1861,8 @@ def model_manager(state:dict):
                 "Select Model",
                 [("[enabled] " if is_model_enabled(p, settings) else "[disabled] ") + model_label(p) for p in MODEL_PROFILES],
                 status=state,
+                footer=["Press s to select the highlighted model."],
+                select_keys={"s", "S"},
             )
             selected = MODEL_PROFILES[selected_idx]
             if not is_model_enabled(selected, settings):
@@ -1923,7 +1960,16 @@ def settings_flow(state:dict):
             while True:
                 settings = state.get("security_settings", read_security_settings())
                 options = [("[enabled] " if is_model_enabled(profile, settings) else "[disabled] ") + model_label(profile) for profile in MODEL_PROFILES] + ["Back"]
-                pick = choose_menu("Model Controls", options, status=state, footer=["Disabled models are excluded from chat, scans, and entropy-random selection."])
+                pick = choose_menu(
+                    "Model Controls",
+                    options,
+                    status=state,
+                    footer=[
+                        "Press s to select/deselect the highlighted model.",
+                        "Disabled models are excluded from chat, scans, and entropy-random selection.",
+                    ],
+                    select_keys={"s", "S"},
+                )
                 if pick >= len(MODEL_PROFILES):
                     break
                 profile = MODEL_PROFILES[pick]
@@ -2033,7 +2079,7 @@ async def chat_session(state:dict):
                 "Live Chat",
                 "Encrypted model session with local history logging.",
                 "Boot Sequence",
-                [f"Decrypting model payload for {model_label(profile)}...", f"Loading {MODEL_RUNTIME_NAMES.get(profile.get('runtime'), profile.get('runtime', 'unknown'))} runtime...", "Preparing secure chat loop..."],
+                [f"Decrypting model payload for {model_label(profile)}...", f"Loading {model_runtime_name(profile)} runtime...", "Preparing secure chat loop..."],
             )
             runtime = await loop.run_in_executor(ex, load_model_runtime_blocking, profile, model_path)
         except Exception as e:
@@ -2399,4 +2445,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
