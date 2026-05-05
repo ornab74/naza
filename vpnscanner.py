@@ -1,7 +1,7 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
+import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile, importlib, importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Tuple, Callable, Dict
+from typing import Any, Optional, List, Tuple, Callable, Dict
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -18,14 +18,15 @@ except Exception:
     qml = None
     pnp = None
 
-MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
-MODEL_FILE = "llama3-small-Q3_K_M.gguf"
+MODEL_REPO = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/"
+MODEL_FILE = "gemma-4-E2B-it.litertlm"
+MODEL_RUNTIME = "litert_lm"
 MODELS_DIR = Path("models")
 MODEL_PATH = MODELS_DIR / MODEL_FILE
 ENCRYPTED_MODEL = MODEL_PATH.with_suffix(MODEL_PATH.suffix + ".aes")
 DB_PATH = Path("chat_history.db.aes")
 KEY_PATH = Path(".enc_key")
-EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
+EXPECTED_HASH = "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 CSI = "\x1b["
@@ -279,6 +280,85 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
+def extract_llama_text(out: Any) -> str:
+    if isinstance(out, dict):
+        choices = out.get("choices")
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, dict):
+                text = first_choice.get("text")
+                return "" if text is None else str(text)
+        text = out.get("text")
+        return "" if text is None else str(text)
+    return str(out)
+
+def extract_litert_text(response: Any) -> str:
+    if isinstance(response, str):
+        return response
+    if isinstance(response, dict):
+        parts = []
+        for item in response.get("content", []):
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+        if parts:
+            return "".join(parts)
+        return str(response.get("text", ""))
+    return str(response)
+
+class LocalModelRuntime:
+    def __init__(self, runtime: str, model_path: Path):
+        self.runtime = runtime
+        self.model_path = model_path
+        self.llm: Any = None
+        self.engine_ctx: Any = None
+        self.engine: Any = None
+        self.conversation_ctx: Any = None
+        self.conversation: Any = None
+
+    def load(self):
+        if self.runtime == "litert_lm":
+            if importlib.util.find_spec("litert_lm") is None:
+                raise RuntimeError("LiteRT-LM runtime missing. Install litert-lm==0.11.0 in the active venv.")
+            import litert_lm
+            try:
+                litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
+            except Exception:
+                pass
+            self.engine_ctx = litert_lm.Engine(str(self.model_path))
+            self.engine = self.engine_ctx.__enter__() if hasattr(self.engine_ctx, "__enter__") else self.engine_ctx
+            self.conversation_ctx = self.engine.create_conversation()
+            self.conversation = self.conversation_ctx.__enter__() if hasattr(self.conversation_ctx, "__enter__") else self.conversation_ctx
+            return self
+        self.llm = load_llama_model_blocking(self.model_path)
+        return self
+
+    def close(self):
+        for ctx in (self.conversation_ctx, self.engine_ctx):
+            try:
+                exit_fn = getattr(ctx, "__exit__", None)
+                if callable(exit_fn):
+                    exit_fn(None, None, None)
+            except Exception:
+                pass
+        self.conversation = None
+        self.engine = None
+        self.llm = None
+
+    def generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2) -> str:
+        if self.runtime == "litert_lm":
+            if self.conversation is None:
+                raise RuntimeError("LiteRT-LM conversation is not loaded")
+            return extract_litert_text(self.conversation.send_message(prompt))
+        if self.llm is None:
+            raise RuntimeError("llama.cpp model is not loaded")
+        return extract_llama_text(self.llm(prompt, max_tokens=max_tokens, temperature=temperature))
+
+    def __call__(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2):
+        return {"choices": [{"text": self.generate(prompt, max_tokens=max_tokens, temperature=temperature)}]}
+
+def load_model_runtime_blocking(model_path: Path) -> LocalModelRuntime:
+    return LocalModelRuntime(MODEL_RUNTIME, model_path).load()
+
 def collect_system_metrics() -> Dict[str, float]:
     if psutil is None:
         raise RuntimeError("psutil is required for system metrics")
@@ -398,7 +478,7 @@ def punkd_apply(prompt_text: str, token_weights: Dict[str,float], profile: str =
     patched = prompt_text + "\n\n[PUNKD_MARKERS] " + markers
     return patched, multiplier
 
-def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk_tokens: int = 64, base_temperature: float = 0.2, punkd_profile: str = "balanced", streaming_callback: Optional[Callable[[str], None]] = None) -> str:
+def chunked_generate(llm: Callable[..., object], prompt: str, max_total_tokens: int = 256, chunk_tokens: int = 64, base_temperature: float = 0.2, punkd_profile: str = "balanced", streaming_callback: Optional[Callable[[str], None]] = None) -> str:
     assembled = ""
     cur_prompt = prompt
     token_weights = punkd_analyze(prompt, top_n=16)
@@ -551,7 +631,7 @@ async def chat_session(state:dict):
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            print("Loading model..."); llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            print("Loading model..."); llm = await loop.run_in_executor(ex, load_model_runtime_blocking, MODEL_PATH)
         except Exception as e:
             print(f"Failed to load: {e}")
             if MODEL_PATH.exists():
@@ -585,6 +665,10 @@ async def chat_session(state:dict):
                 print("\nModel:\n"+result+"\n")
                 await log_interaction(prompt, result, state['key'])
         finally:
+            try:
+                close_fn = getattr(llm, "close", None)
+                if callable(close_fn): close_fn()
+            except Exception: pass
             try: del llm
             except Exception: pass
             print("Re-encrypting model and removing plaintext...")
@@ -610,7 +694,7 @@ async def road_scanner_flow(state:dict):
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            llm = await loop.run_in_executor(ex, load_model_runtime_blocking, MODEL_PATH)
         except Exception as e:
             print(f"Model load failed: {e}")
             if MODEL_PATH.exists():
@@ -677,6 +761,10 @@ async def road_scanner_flow(state:dict):
             outp = {"input": data, "prompt": prompt, "result": label, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
             fn = input("Filename to save JSON (default road_scan.json): ").strip() or "road_scan.json"
             Path(fn).write_text(json.dumps(outp, indent=2)); print(f"Saved {fn}")
+        try:
+            close_fn = getattr(llm, "close", None)
+            if callable(close_fn): close_fn()
+        except Exception: pass
         try: del llm
         except Exception: pass
         print("Re-encrypting model and removing plaintext...")

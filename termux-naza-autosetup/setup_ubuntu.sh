@@ -46,6 +46,8 @@ if [ -f "$APP_DIR/requirements.txt" ]; then
     pip install -r "$APP_DIR/requirements.txt"
 fi
 
+pip install litert-lm==0.11.0
+
 chmod +x "$APP_DIR/main.py" "$APP_DIR/main_foodwater.py" 2>/dev/null || true
 
 echo

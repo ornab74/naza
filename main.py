@@ -23,8 +23,14 @@ except Exception:
     qml = None
     pnp = None
 
-MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
-MODEL_FILE = "llama3-small-Q3_K_M.gguf"
+GEMMA_MODEL_REPO = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/"
+GEMMA_MODEL_FILE = "gemma-4-E2B-it.litertlm"
+GEMMA_EXPECTED_HASH = "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42"
+LLAMA_MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
+LLAMA_MODEL_FILE = "llama3-small-Q3_K_M.gguf"
+LLAMA_EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
+MODEL_REPO = GEMMA_MODEL_REPO
+MODEL_FILE = GEMMA_MODEL_FILE
 MODELS_DIR = Path("models")
 MODEL_PATH = MODELS_DIR / MODEL_FILE
 ENCRYPTED_MODEL = MODEL_PATH.with_suffix(MODEL_PATH.suffix + ".aes")
@@ -45,10 +51,10 @@ GCM_TAG_SIZE = 16
 FILE_CRYPTO_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_STREAM_HEADER_SIZE = 1024 * 1024
 SCANNER_METRIC_SAMPLES = 5
-EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
+EXPECTED_HASH = GEMMA_EXPECTED_HASH
 MODEL_PROFILES = [
-    {"id": "llama3-small", "name": "Llama 3 Small GGUF", "repo": MODEL_REPO, "file": MODEL_FILE, "expected_hash": EXPECTED_HASH, "runtime": "llama_cpp"},
-    {"id": "gemma4-e2b-litert", "name": "Gemma 4 E2B LiteRT-LM", "repo": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/", "file": "gemma-4-E2B-it.litertlm", "expected_hash": "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42", "runtime": "litert_lm"},
+    {"id": "gemma4-e2b-litert", "name": "Gemma 4 E2B LiteRT-LM", "repo": GEMMA_MODEL_REPO, "file": GEMMA_MODEL_FILE, "expected_hash": GEMMA_EXPECTED_HASH, "runtime": "litert_lm"},
+    {"id": "llama3-small", "name": "Llama 3 Small GGUF", "repo": LLAMA_MODEL_REPO, "file": LLAMA_MODEL_FILE, "expected_hash": LLAMA_EXPECTED_HASH, "runtime": "llama_cpp"},
 ]
 MODEL_RUNTIME_NAMES = {"llama_cpp": "llama.cpp", "litert_lm": "LiteRT-LM"}
 DEFAULT_SECURITY_SETTINGS = {
@@ -1291,7 +1297,7 @@ class LocalModelRuntime:
     def load(self):
         if self.runtime == "litert_lm":
             if importlib.util.find_spec("litert_lm") is None:
-                raise RuntimeError("LiteRT-LM runtime missing. Install litert-lm-api==0.10.1 and litert-lm==0.10.1.")
+                raise RuntimeError("LiteRT-LM runtime missing. Install litert-lm==0.11.0 in the active venv.")
             import litert_lm
             try:
                 litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
@@ -2339,10 +2345,12 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = allocate_temp_db_path()
+    profile = state.get("selected_model", read_selected_model_profile())
+    encrypted_path = encrypted_model_path_for(profile)
+    tmp_model = MODELS_DIR / (profile["file"] + ".tmp"); tmp_db = allocate_temp_db_path()
     try:
-        if ENCRYPTED_MODEL.exists():
-            try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
+        if encrypted_path.exists():
+            try: decrypt_file(encrypted_path, tmp_model, old_key)
             except Exception as e: print(f"Failed to decrypt model with current key: {e}"); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
         if DB_PATH.exists():
             try: decrypt_file(DB_PATH, tmp_db, old_key)
@@ -2358,8 +2366,8 @@ def rekey_flow(state:dict):
     try:
         if tmp_model.exists():
             old_h = sha256_file(tmp_model)
-            encrypt_file(tmp_model, ENCRYPTED_MODEL, new_key)
-            new_h_enc = sha256_file(ENCRYPTED_MODEL)
+            encrypt_file(tmp_model, encrypted_path, new_key)
+            new_h_enc = sha256_file(encrypted_path)
             print(f"Model plaintext SHA256: {old_h}")
             print(f"Encrypted model SHA256: {new_h_enc}")
         if tmp_db.exists():

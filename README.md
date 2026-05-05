@@ -15,7 +15,7 @@ two main entrypoints:
 Both scripts share the same secure model manager, encrypted history database, encrypted
 settings store, model selection controls, rekey workflow, and side-channel defense lab.
 
-> Current model menu: `llama3-small` and `gemma4-e2b-litert`.
+> Current model menu: `gemma4-e2b-litert` and `llama3-small`.
 > The removed Llama 3.2 1B profile is no longer offered by the code, even if old model
 > files remain on disk.
 
@@ -154,8 +154,8 @@ Everything else is intentionally shared between both scripts.
 
 | ID | Runtime | File | Notes |
 | --- | --- | --- | --- |
-| `llama3-small` | `llama.cpp` | `llama3-small-Q3_K_M.gguf` | Tiny GGUF model for lightweight local chat/scans. |
 | `gemma4-e2b-litert` | `LiteRT-LM` | `gemma-4-E2B-it.litertlm` | Larger LiteRT-LM model. Uses streaming encryption cleanly. |
+| `llama3-small` | `llama.cpp` | `llama3-small-Q3_K_M.gguf` | Tiny GGUF model for lightweight local chat/scans. |
 
 The app can select a fixed model or choose from enabled encrypted models using entropy.
 Disabled models are excluded from chat, scans, and entropy-random selection.
@@ -403,7 +403,7 @@ is usually dependency compilation rather than Naza itself.
 
 1. Open Model Manager.
 2. Choose Select Model.
-3. Pick `llama3-small` or `gemma4-e2b-litert`.
+3. Pick `gemma4-e2b-litert` or `llama3-small`.
 
 ### Use entropy selection
 
@@ -722,7 +722,7 @@ source ~/naza_env/bin/activate
 git clone https://gitlab.com/barkzero1/naza.git
 cd naza
 pip install --upgrade pip
-pip install httpx aiosqlite cryptography llama-cpp-python psutil pennylane numpy
+pip install httpx aiosqlite cryptography llama-cpp-python litert-lm psutil pennylane numpy
 ```
 
 Create sudo user:  

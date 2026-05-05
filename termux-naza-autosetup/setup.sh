@@ -49,6 +49,7 @@ su - sudouser -c "
     source venv/bin/activate
     pip install --upgrade pip
     [ -f requirements.txt ] && pip install -r requirements.txt || true
+    pip install litert-lm==0.11.0
     chmod +x main.py main_foodwater.py
 "
 
