@@ -154,25 +154,43 @@ def _legacy_settings_payload() -> Dict[str, object]:
         "colorwheel_state": _read_colorwheel_state_file(),
     }
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _disabled_model_ids_from(settings: dict) -> List[str]:
+    valid_ids = {str(profile["id"]) for profile in MODEL_PROFILES}
+    disabled_raw = settings.get("disabled_model_ids", [])
+    if not isinstance(disabled_raw, list):
+        return []
+    return [model_id for model_id in disabled_raw if isinstance(model_id, str) and model_id in valid_ids]
+
 def normalize_security_settings(raw: Optional[dict] = None) -> dict:
     settings = dict(DEFAULT_SECURITY_SETTINGS)
     if isinstance(raw, dict):
         settings.update(raw)
-    valid_ids = {profile["id"] for profile in MODEL_PROFILES}
-    disabled = [model_id for model_id in settings.get("disabled_model_ids", []) if model_id in valid_ids]
+    disabled = _disabled_model_ids_from(settings)
     if len(disabled) >= len(MODEL_PROFILES):
         disabled = disabled[:-1]
     settings["disabled_model_ids"] = disabled
     profile_name = str(settings.get("defense_profile", "hardened")).lower()
     settings["defense_profile"] = profile_name if profile_name in DEFENSE_PROFILE_PRESETS else "hardened"
     settings["defense_voting"] = bool(settings.get("defense_voting", True))
-    settings["metric_samples"] = max(3, min(13, int(settings.get("metric_samples", 7))))
-    settings["max_defense_passes"] = max(1, min(5, int(settings.get("max_defense_passes", 5))))
-    settings["noise_width"] = max(1, min(4, int(settings.get("noise_width", 2))))
-    settings["jitter_scale"] = max(0.5, min(2.0, float(settings.get("jitter_scale", 1.2))))
+    settings["metric_samples"] = max(3, min(13, _safe_int(settings.get("metric_samples"), 7)))
+    settings["max_defense_passes"] = max(1, min(5, _safe_int(settings.get("max_defense_passes"), 5)))
+    settings["noise_width"] = max(1, min(4, _safe_int(settings.get("noise_width"), 2)))
+    settings["jitter_scale"] = max(0.5, min(2.0, _safe_float(settings.get("jitter_scale"), 1.2)))
     settings["colorwheel_enabled"] = bool(settings.get("colorwheel_enabled", True))
-    settings["colorwheel_spins"] = max(16, min(256, int(settings.get("colorwheel_spins", 96))))
-    settings["colorwheel_rings"] = max(6, min(24, int(settings.get("colorwheel_rings", 12))))
+    settings["colorwheel_spins"] = max(16, min(256, _safe_int(settings.get("colorwheel_spins"), 96)))
+    settings["colorwheel_rings"] = max(6, min(24, _safe_int(settings.get("colorwheel_rings"), 12)))
     settings["ml_trace_scramble"] = bool(settings.get("ml_trace_scramble", True))
     return settings
 
@@ -284,7 +302,7 @@ def write_security_settings(settings: dict) -> None:
 
 def is_model_enabled(profile: dict, settings: Optional[dict] = None) -> bool:
     settings = settings or read_security_settings()
-    return profile["id"] not in settings.get("disabled_model_ids", [])
+    return str(profile["id"]) not in _disabled_model_ids_from(settings)
 
 def enabled_model_profiles(settings: Optional[dict] = None) -> List[dict]:
     settings = settings or read_security_settings()
@@ -323,14 +341,14 @@ def write_colorwheel_state(state: dict) -> None:
 
 def colorwheel_entropy_state(purpose: str, context: Optional[dict] = None, spins: Optional[int] = None, persist: bool = True) -> dict:
     settings = read_security_settings()
-    rings = int(settings.get("colorwheel_rings", 12))
-    spin_count = int(spins or settings.get("colorwheel_spins", 96))
+    rings = _safe_int(settings.get("colorwheel_rings"), 12)
+    spin_count = int(spins) if spins is not None else _safe_int(settings.get("colorwheel_spins"), 96)
     previous = read_colorwheel_state()
     base = {
         "purpose": purpose,
         "context": context or {},
         "previous": previous.get("digest", ""),
-        "tick": previous.get("tick", 0),
+        "tick": _safe_int(previous.get("tick"), 0),
         "pid": os.getpid(),
         "thread": threading.get_ident(),
         "time_ns": time.time_ns(),
@@ -340,7 +358,7 @@ def colorwheel_entropy_state(purpose: str, context: Optional[dict] = None, spins
     trace = []
     for spin in range(max(1, spin_count)):
         start = time.perf_counter_ns()
-        rgb = _rgb_from_wheel(digest[spin % len(digest)] + spin + int(previous.get("wheel_index", 0)), rings)
+        rgb = _rgb_from_wheel(digest[spin % len(digest)] + spin + _safe_int(previous.get("wheel_index"), 0), rings)
         timing = time.perf_counter_ns() - start
         digest = hashlib.blake2b(digest + bytes(rgb) + timing.to_bytes(8, "big", signed=False) + os.urandom(4) + spin.to_bytes(2, "big", signed=False), digest_size=64).digest()
         if spin % max(1, spin_count // 8) == 0:
@@ -349,7 +367,7 @@ def colorwheel_entropy_state(purpose: str, context: Optional[dict] = None, spins
     rgb = _rgb_from_wheel(index, rings)
     state = {
         "digest": hashlib.sha3_256(digest).hexdigest(),
-        "tick": int(previous.get("tick", 0)) + 1,
+        "tick": _safe_int(previous.get("tick"), 0) + 1,
         "wheel_index": index,
         "angle_deg": round(360.0 * index / float(rings), 2),
         "rgb": list(rgb),
@@ -392,7 +410,7 @@ def trace_scramble_delay(purpose: str, context: Optional[dict] = None) -> None:
     if not settings.get("ml_trace_scramble", True):
         return
     seed = colorwheel_entropy_bytes("trace-scramble:" + purpose, context=context, length=16)
-    delay = 0.001 + (int.from_bytes(seed[:2], "big") / 65535.0) * float(settings.get("jitter_scale", 1.0)) * 0.045
+    delay = 0.001 + (int.from_bytes(seed[:2], "big") / 65535.0) * _safe_float(settings.get("jitter_scale"), 1.0) * 0.045
     acc = int.from_bytes(seed[2:10], "big")
     for idx in range(64 + seed[10] % 192):
         acc ^= int((math.sin((acc + idx) % 313) + 1.0) * 1000000)
@@ -405,10 +423,10 @@ def render_colorwheel_spinner(label: str = "Colorwheel entropy", frames: int = 1
     if not settings.get("colorwheel_enabled", True):
         return "colorwheel=disabled"
     state = read_colorwheel_state()
-    rings = int(settings.get("colorwheel_rings", 12))
+    rings = _safe_int(settings.get("colorwheel_rings"), 12)
     glyphs = ["|", "/", "-", "\\"]
     for frame in range(max(1, frames)):
-        idx = (int(state.get("wheel_index", 0)) + frame) % rings
+        idx = (_safe_int(state.get("wheel_index"), 0) + frame) % rings
         rgb = _rgb_from_wheel(idx, rings)
         sys.stdout.write("\r" + _ansi_rgb(f"{glyphs[frame % len(glyphs)]} {label} ring={idx:02d}", rgb))
         sys.stdout.flush()
@@ -699,8 +717,9 @@ _OQS_IMPORT_ERROR = None
 
 def side_channel_noise_jitter(max_ms: int = 25, min_rounds: int = 1, max_rounds: int = 4) -> None:
     settings = read_security_settings()
-    max_ms = max(1, int(max_ms * float(settings.get("jitter_scale", 1.0))))
-    max_rounds = max(min_rounds, int(max_rounds * float(settings.get("jitter_scale", 1.0))))
+    jitter_scale = _safe_float(settings.get("jitter_scale"), 1.0)
+    max_ms = max(1, int(max_ms * jitter_scale))
+    max_rounds = max(min_rounds, int(max_rounds * jitter_scale))
     rounds = min_rounds + int.from_bytes(os.urandom(1), "big") % max(1, max_rounds - min_rounds + 1)
     acc = 0
     for _ in range(rounds):
@@ -733,7 +752,7 @@ def stop_noise_threads(stop_event, threads) -> None:
 
 def run_with_side_channel_noise(fn, *args, **kwargs):
     settings = read_security_settings()
-    stop_event, threads = start_noise_threads(width=int(settings.get("noise_width", 2)))
+    stop_event, threads = start_noise_threads(width=_safe_int(settings.get("noise_width"), 2))
     try:
         trace_scramble_delay("pre-critical-section", {"fn": getattr(fn, "__name__", "call")})
         side_channel_noise_jitter(35, 2, 5)
@@ -1311,7 +1330,7 @@ class LocalModelRuntime:
     def __call__(self, prompt: str, max_tokens: int = 256, temperature: float = 0.2):
         return {"choices": [{"text": self.generate(prompt, max_tokens=max_tokens, temperature=temperature)}]}
 
-def extract_llama_text(out: object) -> str:
+def extract_llama_text(out: Any) -> str:
     if isinstance(out, dict):
         choices = out.get("choices")
         if isinstance(choices, list) and choices:
@@ -1401,7 +1420,7 @@ def _median(values: List[float]) -> float:
 
 def collect_resilient_system_metrics(samples: int = SCANNER_METRIC_SAMPLES) -> Dict[str, float]:
     settings = read_security_settings()
-    samples = max(samples, int(settings.get("metric_samples", samples)))
+    samples = max(samples, _safe_int(settings.get("metric_samples"), samples))
     readings = []
     for _ in range(max(1, samples)):
         add_interference_jitter(12)
@@ -1529,18 +1548,6 @@ def normalize_risk_label(text: str) -> str:
 
 def _clamp01(value: float) -> float:
     return float(max(0.0, min(1.0, value)))
-
-def _safe_float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-def _safe_int(value: object, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 def _parse_int(value, default: int = 0, low: int = 0, high: int = 12) -> int:
     try:
@@ -1819,7 +1826,7 @@ def header(status:dict):
     selected = status.get("selected_model", read_selected_model_profile()) if status else read_selected_model_profile()
     mode = status.get("model_selection_mode", read_model_selection_mode()) if status else read_model_selection_mode()
     settings = status.get("security_settings", read_security_settings()) if status else read_security_settings()
-    disabled = len(settings.get("disabled_model_ids", []))
+    disabled = len(_disabled_model_ids_from(settings))
     s = (
         f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | "
         f"Pick: {selected['name']} | Mode: {mode} | Defense: {settings.get('defense_profile')} | "
@@ -1973,7 +1980,7 @@ def settings_flow(state:dict):
                 if pick >= len(MODEL_PROFILES):
                     break
                 profile = MODEL_PROFILES[pick]
-                disabled = list(settings.get("disabled_model_ids", []))
+                disabled = _disabled_model_ids_from(settings)
                 if profile["id"] in disabled:
                     disabled.remove(profile["id"])
                 else:
