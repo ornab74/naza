@@ -23,8 +23,8 @@ except Exception:
     qml = None
     pnp = None
 
-GEMMA_MODEL_REPO = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/"
-GEMMA_MODEL_FILE = "gemma-4-E2B-it.litertlm"
+GEMMA_MODEL_REPO = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/a039dc0b173d0710237e4c8dc40452302c8176e4/"
+GEMMA_MODEL_FILE = "gemma-4-2p3b-it.litertlm" 
 GEMMA_EXPECTED_HASH = "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42"
 LLAMA_MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
 LLAMA_MODEL_FILE = "llama3-small-Q3_K_M.gguf"
