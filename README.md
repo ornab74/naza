@@ -13,9 +13,9 @@ Some things we have tested its usage for with a degree of emergent intelligence/
 5. Heart Attacks
 6. Cancer
 7. VPN security
-8. Infosec/Deployment environment security
+8. Infosec/Deployment environment security/ HVAC/ Home Electrical Systems
 9. Device security
-10. Motorcycle/Maintaince Safety
+10. Motorcycle/Maintenance Safety
 11. Motorcycle route safety
 12. Delivery route safety/security/risk
 
