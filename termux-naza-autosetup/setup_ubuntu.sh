@@ -10,6 +10,7 @@ set -euo pipefail
 APP_DIR="$HOME/naza"
 VENV_DIR="$APP_DIR/venv"
 REPO_URL="https://github.com/ornab74/naza.git"
+NAZA_REF="${NAZA_REF:-main}"
 
 echo "Updating system packages..."
 sudo apt update
@@ -29,10 +30,12 @@ echo "Cloning or updating naza repo..."
 mkdir -p "$APP_DIR"
 
 if [ -d "$APP_DIR/.git" ]; then
-    git -C "$APP_DIR" pull --ff-only
+    git -C "$APP_DIR" fetch --quiet origin "$NAZA_REF"
 else
     git clone "$REPO_URL" "$APP_DIR"
+    git -C "$APP_DIR" fetch --quiet origin "$NAZA_REF"
 fi
+git -C "$APP_DIR" checkout --detach FETCH_HEAD
 
 echo "Creating Python virtual environment..."
 python3 -m venv "$VENV_DIR"
@@ -43,7 +46,7 @@ source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip
 
 if [ -f "$APP_DIR/requirements.txt" ]; then
-    pip install -r "$APP_DIR/requirements.txt"
+    pip install --require-hashes -r "$APP_DIR/requirements.txt"
 fi
 
 chmod +x "$APP_DIR/main.py" 2>/dev/null || true

@@ -1,4 +1,4 @@
-import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
+import os, sys, time, json, shutil, hashlib, hmac, asyncio, threading, httpx, aiosqlite, getpass, math, random, re, tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Tuple, Callable, Dict
@@ -284,13 +284,32 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def write_private_file(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        path.chmod(0o600)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
+
 def get_or_create_key() -> bytes:
     if KEY_PATH.exists():
+        KEY_PATH.chmod(0o600)
         d = KEY_PATH.read_bytes()
         if len(d) >= 48: return d[16:48]
         return d[:32]
     key = AESGCM.generate_key(256)
-    KEY_PATH.write_bytes(key)
+    write_private_file(KEY_PATH, key)
     print(f"🔑 New random key generated and saved to {KEY_PATH}")
     return key
 
@@ -302,6 +321,7 @@ def derive_key_from_passphrase(pw:str, salt:Optional[bytes]=None) -> Tuple[bytes
 
 def ensure_key_interactive() -> bytes:
     if KEY_PATH.exists():
+        KEY_PATH.chmod(0o600)
         data = KEY_PATH.read_bytes()
         if len(data) >= 48: return data[16:48]
         if len(data) >= 32: return data[:32]
@@ -316,24 +336,27 @@ def ensure_key_interactive() -> bytes:
             print("Passphrases mismatch. Aborting.")
             sys.exit(1)
         salt, key = derive_key_from_passphrase(pw)
-        KEY_PATH.write_bytes(salt + key)
+        write_private_file(KEY_PATH, salt + key)
         print(f"Saved salt+derived key to {KEY_PATH}")
         return key
     else:
         key = AESGCM.generate_key(256)
-        KEY_PATH.write_bytes(key)
+        write_private_file(KEY_PATH, key)
         print(f"Saved random key to {KEY_PATH}")
         return key
 
 def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None, expected_sha: Optional[str]=None):
     print(f"⬇️  Downloading model from {url}\nTo: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        h = hashlib.sha256()
-        with dest.open("wb") as f:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".part", dir=dest.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f, httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
+            fd = -1
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            h = hashlib.sha256()
             for chunk in r.iter_bytes(chunk_size=8192):
                 if not chunk: break
                 f.write(chunk)
@@ -344,21 +367,20 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
                     bar = int(pct // 2)
                     sys.stdout.write(f"\r[{('#'*bar).ljust(50)}] {pct:5.1f}% ({done//1024}KB/{total//1024}KB)")
                     sys.stdout.flush()
+            f.flush()
+            os.fsync(f.fileno())
+        sha = h.hexdigest()
+        if expected_sha and not hmac.compare_digest(sha.lower(), expected_sha.lower()):
+            raise ValueError(f"SHA256 mismatch: expected {expected_sha}, got {sha}")
+        os.replace(tmp_path, dest)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
     if show_progress: print("\n✅ Download complete.")
-    sha = h.hexdigest()
     print(f"SHA256: {sha}")
     if expected_sha:
-        if sha.lower() == expected_sha.lower():
-            print(color("SHA256 matches expected.", fg=32, bold=True))
-        else:
-            print(color(f"SHA256 MISMATCH! expected {expected_sha} got {sha}", fg=31, bold=True))
-            keep_file = input("Hash mismatch. Keep this download anyway? (y/N): ").strip().lower() == "y"
-            if not keep_file:
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
-                raise ValueError("Download aborted because SHA256 verification failed.")
+        print(color("SHA256 matches expected.", fg=32, bold=True))
     return sha
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
@@ -366,7 +388,7 @@ def encrypt_file(src: Path, dest: Path, key: bytes):
     data = src.read_bytes()
     start = time.time()
     enc = aes_encrypt(data, key)
-    dest.write_bytes(enc)
+    write_private_file(dest, enc)
     dur = time.time()-start
     print(f"✅ Encrypted ({len(enc)} bytes) in {dur:.2f}s")
 
@@ -374,7 +396,7 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔓 Decrypting {src} -> {dest}")
     enc = src.read_bytes()
     data = aes_decrypt(enc, key)
-    dest.write_bytes(data)
+    write_private_file(dest, data)
     print(f"✅ Decrypted ({len(data)} bytes)")
 
 async def init_db(key: bytes):
@@ -386,7 +408,7 @@ async def init_db(key: bytes):
         try:
             with temp_path.open("rb") as f:
                 enc = aes_encrypt(f.read(), key)
-            DB_PATH.write_bytes(enc)
+            write_private_file(DB_PATH, enc)
         finally:
             safe_cleanup([temp_path])
 
@@ -399,7 +421,7 @@ async def log_interaction(prompt: str, response: str, key: bytes):
             await db.commit()
         with dec.open("rb") as f:
             enc = aes_encrypt(f.read(), key)
-        DB_PATH.write_bytes(enc)
+        write_private_file(DB_PATH, enc)
     finally:
         safe_cleanup([dec])
 
@@ -417,7 +439,7 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
                 async with db.execute("SELECT id,timestamp,prompt,response FROM history ORDER BY id DESC LIMIT ? OFFSET ?", (limit,offset)) as cur:
                     async for r in cur: rows.append(r)
         with dec.open("rb") as f:
-            DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+            write_private_file(DB_PATH, aes_encrypt(f.read(), key))
         return rows
     finally:
         safe_cleanup([dec])
@@ -639,6 +661,7 @@ f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
 
 def allocate_temp_db_path() -> Path:
     fd, path = tempfile.mkstemp(prefix="chat_history_", suffix=".db")
+    os.fchmod(fd, 0o600)
     os.close(fd)
     return Path(path)
 
@@ -919,7 +942,11 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = allocate_temp_db_path()
+    model_fd, model_tmp_name = tempfile.mkstemp(prefix="naza-model-", suffix=".gguf")
+    os.fchmod(model_fd, 0o600); os.close(model_fd)
+    tmp_model = Path(model_tmp_name); tmp_db = allocate_temp_db_path()
+    # Keep unpredictable names, but do not treat absent source artifacts as present.
+    tmp_model.unlink(); tmp_db.unlink()
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -930,11 +957,11 @@ def rekey_flow(state:dict):
     except Exception as e:
         print(f"Unexpected: {e}"); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
     if choice=="1":
-        new_key = AESGCM.generate_key(256); KEY_PATH.write_bytes(new_key); print("New random key generated and saved.")
+        new_key = AESGCM.generate_key(256); write_private_file(KEY_PATH, new_key); print("New random key generated and saved.")
     else:
         pw = getpass.getpass("Enter new passphrase: "); pw2 = getpass.getpass("Confirm: ")
         if pw!=pw2: print("Mismatch."); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
-        salt, derived = derive_key_from_passphrase(pw); KEY_PATH.write_bytes(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
+        salt, derived = derive_key_from_passphrase(pw); write_private_file(KEY_PATH, salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
     try:
         if tmp_model.exists():
             old_h = sha256_file(tmp_model)
@@ -944,7 +971,7 @@ def rekey_flow(state:dict):
             print(f"Encrypted model SHA256: {new_h_enc}")
         if tmp_db.exists():
             old_db_h = sha256_file(tmp_db)
-            with tmp_db.open("rb") as f: DB_PATH.write_bytes(aes_encrypt(f.read(), new_key))
+            write_private_file(DB_PATH, aes_encrypt(tmp_db.read_bytes(), new_key))
             new_db_h = sha256_file(DB_PATH)
             print(f"DB plaintext SHA256: {old_db_h}")
             print(f"Encrypted DB SHA256: {new_db_h}")

@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - requirements.in
-      - .github/workflows/lock-and-pq-sign-lockfile.yml
+      - .github/workflows/lock-requirements.yml
 
 jobs:
   lock_and_pq_sign:
@@ -51,9 +51,11 @@ jobs:
           set -euo pipefail
           LIBOQS_VERSION="0.14.0"
           LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
+          LIBOQS_EXPECTED_SHA256="5b0df6138763b3fc4e385d58dbb2ee7c7c508a64a413d76a917529e3a9a207ea"
 
           curl -fsSL -o /tmp/liboqs.tar.gz "${LIBOQS_URL}"
-          LIBOQS_SHA256="$(sha256sum /tmp/liboqs.tar.gz | awk '{print $1}')"
+          echo "${LIBOQS_EXPECTED_SHA256}  /tmp/liboqs.tar.gz" | sha256sum -c -
+          LIBOQS_SHA256="${LIBOQS_EXPECTED_SHA256}"
 
           echo "LIBOQS_VERSION=${LIBOQS_VERSION}" >> "$GITHUB_ENV"
           echo "LIBOQS_URL=${LIBOQS_URL}" >> "$GITHUB_ENV"
