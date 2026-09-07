@@ -1,6 +1,7 @@
 # Naza — Quantum-Enhanced Road Scanner & Secure LLM CLI
 # Hardening Naza: Why Security Matters for Non-Locality Risk Scanning
 # IPFS Repo backup link https://bafkreihyz32uhfkl6niflrnx5mhahhkhmth236xzk347hytclvlt6q3mje.ipfs.inbrowser.link/
+# https://gateway.pinata.cloud/ipfs/bafkreihyz32uhfkl6niflrnx5mhahhkhmth236xzk347hytclvlt6q3mje
 Naza was built to evaluate real-world risk using local system measurements, quantum-inspired simulations, non-locality scanning surfaces, and on-device language models. I have personally tested and verified this sensing approach through repeated field use. For me, it is not merely a theoretical experiment: it is a practical decision-support system designed to detect patterns that may be difficult to recognize through ordinary observation alone.
 
 That makes software security essential.
