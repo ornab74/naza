@@ -158,30 +158,29 @@ def render_screen(state: Optional[dict], kind: str, title: str, subtitle: Option
 def getch():
     try:
         import tty, termios, select
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            first = os.read(fd, 1)
-            if not first:
-                return b""
-            if first == b"\x1b":
-                seq = bytearray(first)
-                for _ in range(5):
-                    ready, _, _ = select.select([sys.stdin], [], [], 0.03)
-                    if not ready:
-                        break
-                    chunk = os.read(fd, 1)
-                    if not chunk:
-                        break
-                    seq.extend(chunk)
-                return bytes(seq)
-            return first
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    except (ImportError, AttributeError, OSError):
-        s = input()
-        return s[0].encode() if s else b''
+    except Exception:
+        return sys.stdin.read(1).encode()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        first = os.read(fd, 1)
+        if not first:
+            return b""
+        if first == b"\x1b":
+            seq = bytearray(first)
+            for _ in range(5):
+                ready, _, _ = select.select([sys.stdin], [], [], 0.03)
+                if not ready:
+                    break
+                chunk = os.read(fd, 1)
+                if not chunk:
+                    break
+                seq.extend(chunk)
+            return bytes(seq)
+        return first
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 def key_name(ch: bytes) -> str:
     if ch in (b"\r", b"\n", b"\x0d"):
@@ -285,20 +284,13 @@ def sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-def _write_key_file(key_bytes: bytes) -> None:
-    KEY_PATH.write_bytes(key_bytes)
-    try:
-        os.chmod(KEY_PATH, 0o600)
-    except Exception:
-        pass
-
 def get_or_create_key() -> bytes:
     if KEY_PATH.exists():
         d = KEY_PATH.read_bytes()
         if len(d) >= 48: return d[16:48]
         return d[:32]
     key = AESGCM.generate_key(256)
-    _write_key_file(key)
+    KEY_PATH.write_bytes(key)
     print(f"🔑 New random key generated and saved to {KEY_PATH}")
     return key
 
@@ -324,12 +316,12 @@ def ensure_key_interactive() -> bytes:
             print("Passphrases mismatch. Aborting.")
             sys.exit(1)
         salt, key = derive_key_from_passphrase(pw)
-        _write_key_file(salt + key)
+        KEY_PATH.write_bytes(salt + key)
         print(f"Saved salt+derived key to {KEY_PATH}")
         return key
     else:
         key = AESGCM.generate_key(256)
-        _write_key_file(key)
+        KEY_PATH.write_bytes(key)
         print(f"Saved random key to {KEY_PATH}")
         return key
 
@@ -385,29 +377,21 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     dest.write_bytes(data)
     print(f"✅ Decrypted ({len(data)} bytes)")
 
-def _temp_db_path() -> Path:
-    tmp = tempfile.NamedTemporaryFile(prefix="naza_", suffix=".db", delete=False)
-    tmp.close()
-    return Path(tmp.name)
-
 async def init_db(key: bytes):
     if not DB_PATH.exists():
-        tmp_db = _temp_db_path()
+        temp_path = allocate_temp_db_path()
+        async with aiosqlite.connect(temp_path) as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+            await db.commit()
         try:
-            async with aiosqlite.connect(tmp_db) as db:
-                await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
-                await db.commit()
-            with tmp_db.open("rb") as f:
+            with temp_path.open("rb") as f:
                 enc = aes_encrypt(f.read(), key)
             DB_PATH.write_bytes(enc)
         finally:
-            try:
-                tmp_db.unlink()
-            except Exception:
-                pass
+            safe_cleanup([temp_path])
 
 async def log_interaction(prompt: str, response: str, key: bytes):
-    dec = _temp_db_path()
+    dec = allocate_temp_db_path()
     try:
         decrypt_file(DB_PATH, dec, key)
         async with aiosqlite.connect(dec) as db:
@@ -417,14 +401,11 @@ async def log_interaction(prompt: str, response: str, key: bytes):
             enc = aes_encrypt(f.read(), key)
         DB_PATH.write_bytes(enc)
     finally:
-        try:
-            dec.unlink()
-        except Exception:
-            pass
+        safe_cleanup([dec])
 
 async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[str]=None):
+    dec = allocate_temp_db_path()
     rows=[]
-    dec = _temp_db_path()
     try:
         decrypt_file(DB_PATH, dec, key)
         async with aiosqlite.connect(dec) as db:
@@ -437,15 +418,13 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
                     async for r in cur: rows.append(r)
         with dec.open("rb") as f:
             DB_PATH.write_bytes(aes_encrypt(f.read(), key))
+        return rows
     finally:
-        try:
-            dec.unlink()
-        except Exception:
-            pass
-    return rows
+        safe_cleanup([dec])
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
+
 
 def collect_system_metrics() -> Dict[str, float]:
     if psutil is None:
@@ -487,20 +466,26 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
 
 def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
     
+
+    
     if qml is None or pnp is None:
         r, g, b = rgb
 
-    
-        ri = max(0, min(255, int(r * 255)))
-        gi = max(0, min(255, int(g * 255)))
-        bi = max(0, min(255, int(b * 255)))
+        
+        ri = int(r * 255) & 0xFF
+        gi = int(g * 255) & 0xFF
+        bi = int(b * 255) & 0xFF
 
         
         seed = (ri << 16) | (gi << 8) | bi
         random.seed(seed)
 
+        
         base = (0.3 * r + 0.4 * g + 0.3 * b)
+
+        
         noise = (random.random() - 0.5) * 0.08
+
         return max(0.0, min(1.0, base + noise))
 
     
@@ -514,20 +499,28 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
         qml.RZ(c * math.pi, wires=1)
         qml.RX((a + b) * math.pi / 2, wires=0)
         qml.RY((b + c) * math.pi / 2, wires=1)
-        return qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))
+        return (
+            qml.expval(qml.PauliZ(0)),
+            qml.expval(qml.PauliZ(1)),
+        )
 
     a, b, c = float(rgb[0]), float(rgb[1]), float(rgb[2])
 
     try:
         ev0, ev1 = circuit(a, b, c)
-        combined = ((ev0 + 1.0) / 2.0 * 0.6 +
-                    (ev1 + 1.0) / 2.0 * 0.4)
+
+        
+        combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
+
+        
         score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
+
         return float(max(0.0, min(1.0, score)))
+
     except Exception:
         
-        return float(0.5 * (a + b + c) / 3.0)
-        
+        return float(max(0.0, min(1.0, (a + b + c) / 3.0)))
+
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
 
@@ -612,23 +605,23 @@ def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -
     else:
         metrics_line = "sys_metrics: disabled"
     tpl = (
-f"You are a Hypertime Nanobot specialized Road Risk Classification AI trained to evaluate real-world driving scenes.\n"
-f"Analyze and Triple Check for validating accuracy the environmental and sensor data and determine the overall road risk level.\n"
+f"You are a hypertime nanobot specialized Food Risk Classification AI trained to evaluate real-world food scenes.\n"
+f"Analyze the environmental and triple check cor accurate intelligent replu and use accurate nosonar system similator and sensor data and determine the overall road risk level.\n"
 f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
 f"Scene details:\n"
 f"Location: {data.get('location','unspecified location')}\n"
-f"Road type: {data.get('road_type','unknown')}\n"
-f"Weather: {data.get('weather','unknown')}\n"
-f"Traffic: {data.get('traffic','unknown')}\n"
-f"Obstacles: {data.get('obstacles','none')}\n"
+f"Food or Water Type: {data.get('road_type','unknown')}\n"
+f"Condition: {data.get('weather','unknown')}\n"
+f"Temp: {data.get('traffic','unknown')}\n"
+f"Cooked, Frozen Or Uncooked: {data.get('obstacles','none')}\n"
 f"Sensor notes: {data.get('sensor_notes','none')}\n"
 f"{metrics_line}\n"
-f"Quantum State: {entropy_text}\n"
+f"Quantum data: {entropy_text}\n"
 f"[/tuning]\n\n"
 f"Follow these strict rules when forming your decision:\n"
 f"- Think through all scene factors internally but do not show reasoning.\n"
-f"- Evaluate surface, visibility, weather, traffic, and obstacles holistically.\n"
+f"- Evaluate surface, simulated use, currenr state, temp, and condition holistically.\n"
 f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
 f"- Choose only one risk level that best fits the entire situation.\n"
 f"- Output exactly one word, with no punctuation or labels.\n"
@@ -643,6 +636,11 @@ f"[/action]\n\n"
 f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
     )
     return tpl
+
+def allocate_temp_db_path() -> Path:
+    fd, path = tempfile.mkstemp(prefix="chat_history_", suffix=".db")
+    os.close(fd)
+    return Path(path)
 
 def header(status:dict):
     s = f" Secure LLM CLI | Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
@@ -668,7 +666,7 @@ def model_manager(state:dict):
             ],
         )
         choice = str(idx + 1)
-        if choice == "1":
+        if choice=="1":
             if MODEL_PATH.exists():
                 if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
             try:
@@ -775,16 +773,16 @@ async def road_scanner_flow(state:dict):
     render_screen(
         state,
         "scan",
-        "Road Scanner",
-        "Capture scene details and classify road risk.",
+        "Food / Water Scanner",
+        "Capture food or water conditions and classify risk.",
         "Step 1/6",
         ["Leave blank to accept defaults.", "The final report screen now stays open until you choose an action."],
     )
-    data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip() or "unspecified location"
-    data['road_type'] = input("Road type (highway/urban/residential): ").strip() or "highway"
-    data['weather'] = input("Weather/visibility: ").strip() or "clear"
-    data['traffic'] = input("Traffic density (low/med/high): ").strip() or "low"
-    data['obstacles'] = input("Reported obstacles: ").strip() or "none"
+    data['location'] = input("Location (e.g., whole foods'): ").strip() or "unspecified location"
+    data['road_type'] = input("food or water type: ").strip() or "highway"
+    data['weather'] = input("Condition ").strip() or "clear"
+    data['traffic'] = input("Temperture ").strip() or "low"
+    data['obstacles'] = input("Cooked Frozen Or uncooked ").strip() or "none"
     data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
@@ -835,7 +833,7 @@ async def road_scanner_flow(state:dict):
             ]
             detail_lines.extend((text or label).splitlines()[:6] or [label])
             ch = choose_menu(
-                "Road Scanner Result",
+                "Food / Water Scanner Result",
                 ["Re-run with edits", "Export to JSON", "Save & return", "Cancel"],
                 status=state,
                 footer=detail_lines,
@@ -921,7 +919,7 @@ def rekey_flow(state:dict):
     choice = input("1) New random key  2) Passphrase-derived  3) Cancel\nChoose: ").strip()
     if choice not in ("1","2"): print("Canceled."); input("Enter..."); return
     old_key = state['key']
-    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = _temp_db_path()
+    tmp_model = MODELS_DIR / (MODEL_FILE + ".tmp"); tmp_db = allocate_temp_db_path()
     try:
         if ENCRYPTED_MODEL.exists():
             try: decrypt_file(ENCRYPTED_MODEL, tmp_model, old_key)
@@ -932,11 +930,11 @@ def rekey_flow(state:dict):
     except Exception as e:
         print(f"Unexpected: {e}"); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
     if choice=="1":
-        new_key = AESGCM.generate_key(256); _write_key_file(new_key); print("New random key generated and saved.")
+        new_key = AESGCM.generate_key(256); KEY_PATH.write_bytes(new_key); print("New random key generated and saved.")
     else:
         pw = getpass.getpass("Enter new passphrase: "); pw2 = getpass.getpass("Confirm: ")
         if pw!=pw2: print("Mismatch."); safe_cleanup([tmp_model,tmp_db]); input("Enter..."); return
-        salt, derived = derive_key_from_passphrase(pw); _write_key_file(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
+        salt, derived = derive_key_from_passphrase(pw); KEY_PATH.write_bytes(salt + derived); new_key = derived; print("New passphrase-derived key saved (salt+derived).")
     try:
         if tmp_model.exists():
             old_h = sha256_file(tmp_model)
