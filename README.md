@@ -215,6 +215,8 @@ The TUI includes model management, encrypted chat/history support, road-risk sca
 
 From the TUI, use the model manager to download and verify the configured GGUF model, encrypt it, and remove plaintext when requested. Model integrity checks should be treated separately from the experimental risk-scanning output: a correctly hashed model proves artifact identity, not the truth of a prediction.
 
+**Model integrity is fail-closed:** Naza will not promote, encrypt, or load a GGUF whose SHA-256 differs from the pinned `EXPECTED_HASH`. A mismatched download is discarded and there is no continue-anyway override. The hash is checked again immediately before `llama_cpp` loads the plaintext model.
+
 ## Risk labels
 
 Scanner output is reduced to:

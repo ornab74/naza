@@ -802,6 +802,18 @@ def ensure_key_interactive() -> bytes:
         print("Saved hardware-wrapped key.")
     return key
 
+def verify_model_integrity(path: Path, expected_sha: str = EXPECTED_HASH) -> str:
+    """Fail closed unless *path* exactly matches the pinned model digest."""
+    if not path.exists():
+        raise FileNotFoundError(f"model not found: {path}")
+    if _is_symlink(path):
+        raise RuntimeError("model path is a symlink")
+    sha = sha256_file(path)
+    if not hmac.compare_digest(sha.lower(), expected_sha.lower()):
+        raise ValueError(f"model SHA256 mismatch: expected {expected_sha}, got {sha}")
+    return sha
+
+
 def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None, expected_sha: Optional[str]=None):
     print(f"Downloading model from {url}\nTo: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -826,26 +838,27 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
                         sys.stdout.write(f"\r[{('#'*bar).ljust(50)}] {pct:5.1f}% ({done//1024}KB/{total//1024}KB)")
                         sys.stdout.flush()
         if show_progress: print("\nDownload complete.")
+        sha = h.hexdigest()
+        print(f"SHA256: {sha}")
+        if expected_sha and not hmac.compare_digest(sha.lower(), expected_sha.lower()):
+            raise ValueError(f"model SHA256 mismatch: expected {expected_sha}, got {sha}")
+
+        # Promote into the trusted model path only after integrity succeeds.
         os.replace(str(tmp), str(dest))
         _chmod_private(dest)
+        if expected_sha:
+            print(color("SHA256 matches expected.", fg=32, bold=True))
+        return sha, True
     except Exception:
         try:
             if tmp.exists():
-                tmp.unlink()
+                secure_unlink(tmp)
         except Exception:
-            pass
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
         raise
-    sha = h.hexdigest()
-    print(f"SHA256: {sha}")
-    match = True
-    if expected_sha:
-        if hmac.compare_digest(sha.lower(), expected_sha.lower()):
-            print(color("SHA256 matches expected.", fg=32, bold=True))
-        else:
-            match = False
-            print(color(f"SHA256 does not match catalog ({expected_sha}).", fg=33, bold=True))
-            print(color(f"Got {sha}. File is kept; you can still encrypt and use it.", fg=33))
-    return sha, match
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔐 Encrypting {src} -> {dest}")
@@ -918,6 +931,8 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
         secure_unlink(dec)
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
+    # Defense in depth: no plaintext model reaches llama_cpp without matching the pin.
+    verify_model_integrity(model_path)
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
 def _read_text(path: str) -> Optional[str]:
@@ -1888,12 +1903,6 @@ def model_manager(state:dict):
                 sha, match = download_model_httpx(url, MODEL_PATH, show_progress=True, timeout=None, expected_sha=EXPECTED_HASH)
                 print(f"Downloaded to {MODEL_PATH}")
                 print(f"Computed SHA256: {sha}")
-                if not match:
-                    go = input("Hash differs from catalog. Continue and encrypt anyway? (Y/n): ").strip().lower()
-                    if go == "n":
-                        print("Left the plaintext file in place. Not encrypted.")
-                        input("Enter to continue...")
-                        continue
                 if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower()!='n':
                     encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
                     print(f"Encrypted -> {ENCRYPTED_MODEL}")
@@ -1908,6 +1917,14 @@ def model_manager(state:dict):
             input("Enter to continue...")
         elif choice=="3":
             if not MODEL_PATH.exists(): print("No plaintext model to encrypt."); input("Enter..."); continue
+            try:
+                sha = verify_model_integrity(MODEL_PATH)
+                print(f"Verified model SHA256: {sha}")
+            except Exception as e:
+                print(color(f"Refusing to encrypt unverified model: {e}", fg=31, bold=True))
+                secure_unlink(MODEL_PATH)
+                input("Enter...")
+                continue
             encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
             if input("Remove plaintext? (Y/n): ").strip().lower()!='n':
                 secure_unlink(MODEL_PATH); print("Removed plaintext.")
