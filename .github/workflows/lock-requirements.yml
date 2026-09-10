@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system tools
         run: |
@@ -46,14 +46,15 @@ jobs:
             --output-file requirements.txt \
             requirements.in
 
-      - name: Build + install liboqs
+      - name: Build + install pinned liboqs
         run: |
           set -euo pipefail
           LIBOQS_VERSION="0.14.0"
           LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VERSION}.tar.gz"
           LIBOQS_EXPECTED_SHA256="5b0df6138763b3fc4e385d58dbb2ee7c7c508a64a413d76a917529e3a9a207ea"
 
-          curl -fsSL -o /tmp/liboqs.tar.gz "${LIBOQS_URL}"
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+            -o /tmp/liboqs.tar.gz "${LIBOQS_URL}"
           echo "${LIBOQS_EXPECTED_SHA256}  /tmp/liboqs.tar.gz" | sha256sum -c -
           LIBOQS_SHA256="${LIBOQS_EXPECTED_SHA256}"
 
@@ -69,6 +70,9 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DOQS_USE_OPENSSL=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DOQS_ENABLE_KEM_ML_KEM=ON \
+            -DOQS_ENABLE_KEM_HQC=ON \
+            -DOQS_ENABLE_SIG_ML_DSA=ON \
             -G Ninja
 
           cmake --build /tmp/liboqs-src/build --parallel
@@ -77,11 +81,37 @@ jobs:
 
           rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
 
-      - name: Install liboqs-python (oqs module)
+      - name: Install pinned liboqs-python wrapper
         run: |
           set -euo pipefail
-          pip install "liboqs-python==0.14.1"
-          python -c "import oqs; print('oqs ready')"
+
+          LIBOQS_PY_REF="7906e7879a099fa34217035957d977314f99757d"
+          LIBOQS_PY_URL="https://github.com/open-quantum-safe/liboqs-python/archive/${LIBOQS_PY_REF}.tar.gz"
+          LIBOQS_PY_EXPECTED_SHA256="ed785fee58e43f20c042db97389ce63091b331278c24f63828c4b8dac0905f8c"
+
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+            -o /tmp/liboqs-python.tar.gz "${LIBOQS_PY_URL}"
+          echo "${LIBOQS_PY_EXPECTED_SHA256}  /tmp/liboqs-python.tar.gz" | sha256sum -c -
+
+          export OQS_INSTALL_PATH=/usr/local
+          export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+          python -m pip install --no-deps --force-reinstall /tmp/liboqs-python.tar.gz
+
+          python - <<'PY'
+          import oqs
+
+          enabled = set(oqs.get_enabled_sig_mechanisms())
+          if "Dilithium2" not in enabled:
+              raise SystemExit("ERROR: Dilithium2 is not enabled in the pinned liboqs backend")
+          print("oqs ready; Dilithium2 enabled")
+          PY
+
+          echo "LIBOQS_PY_REF=${LIBOQS_PY_REF}" >> "$GITHUB_ENV"
+          echo "LIBOQS_PY_URL=${LIBOQS_PY_URL}" >> "$GITHUB_ENV"
+          echo "LIBOQS_PY_SHA256=${LIBOQS_PY_EXPECTED_SHA256}" >> "$GITHUB_ENV"
+
+          rm -f /tmp/liboqs-python.tar.gz
 
       - name: Prepend provenance header into requirements.txt (BEFORE hashing/signing)
         run: |
@@ -90,6 +120,9 @@ jobs:
             echo "# liboqs_version=${LIBOQS_VERSION}"
             echo "# liboqs_tarball_sha256=${LIBOQS_SHA256}"
             echo "# liboqs_tarball_url=${LIBOQS_URL}"
+            echo "# liboqs_python_ref=${LIBOQS_PY_REF}"
+            echo "# liboqs_python_tarball_sha256=${LIBOQS_PY_SHA256}"
+            echo "# liboqs_python_tarball_url=${LIBOQS_PY_URL}"
             echo "# pq_signature_alg=Dilithium2"
             echo "# pq_manifest=lock.manifest.json"
             echo "# pq_signature=lock.manifest.pqsig"
@@ -118,7 +151,7 @@ jobs:
           req_sha256 = hashlib.sha256(raw).hexdigest()
 
           text = raw.decode("utf-8", errors="replace").splitlines()
-          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\\s\\\\]+)")
+          pkg_re = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
           pinned = []
           for line in text:
               m = pkg_re.match(line.strip())
@@ -159,7 +192,7 @@ jobs:
           ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
 
       - name: Upload lock + PQ materials
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pq-locked-requirements
           path: |
