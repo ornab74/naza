@@ -286,3 +286,493 @@ Pinned liboqs 0.14.0 SHA-256:
 ```
 
 The historical signed manifest records the SHA-256 of the original generated `requirements.txt` as `0e2bf2b1ab253ea518860fca08b101addad3a2a15c466e4c39d3d29dab92704a`. Running the GitHub Action generates a fresh hash-locked requirements file and a fresh PQ-signed manifest/signature/public-key set for the dependency state at that run.
+
+
+# Simulation of Futures.HTF
+
+```text
+╔══════════════════════════════════════════════════════════════╗
+║          NAZA HYPER-TIME SECURITY SIMULATION                ║
+║  HEAD: 9e7c65a4b560ca290c9c25304bf2df2f25778d27             ║
+╚══════════════════════════════════════════════════════════════╝
+
+MODE: CONCEPTUAL / DETERMINISTIC ADVERSARIAL SIMULATION
+REAL EXECUTION: NO
+TIMELINES: 1,000 conceptual branches
+```
+
+## T0 — INSTALL / SUPPLY CHAIN
+
+```text
+[BOOT] cloning repository........................ PASS
+[BOOT] requirements.txt present.................. PASS
+[BOOT] pip hashes present........................ PASS
+[BOOT] PQ manifest present....................... PASS
+[BOOT] PQ signature material present............. PASS
+
+[OQS] liboqs version............................. 0.14.0
+[OQS] native tarball digest pinned............... PASS
+[OQS] HTTPS required............................. PASS
+[OQS] SHA256 BEFORE extraction................... PASS
+[OQS] ML-KEM-1024 enabled........................ PASS
+[OQS] HQC-256 enabled............................ PASS
+
+[OQS-PY] wrapper commit pinned................... PASS
+[OQS-PY] wrapper archive SHA256 pinned........... PASS
+[OQS-PY] SHA256 BEFORE installation.............. PASS
+
+[PQ LOCK] canonical manifest..................... PASS
+[PQ LOCK] Dilithium2 self-verification........... PASS
+```
+
+The workflow really does pin and SHA-256-check both the liboqs archive and the exact liboqs-python commit archive **before** extraction/installation, and explicitly enables the required algorithms.
+
+One important distinction appears in the simulation: the workflow generates a **new Dilithium2 keypair during each lock run** and writes the new public key next to the signature. That gives the generated files an internal consistency check, but it is **not an independent long-term provenance anchor**. An attacker capable of replacing the lock, signature, and public key together could create another internally valid triplet.
+
+```text
+PQ LOCK CONSISTENCY................. PASS
+PQ LOCK INDEPENDENT TRUST ANCHOR.... ABSENT
+```
+
+---
+
+# SIMULATED NORMAL BOOT
+
+```text
+$ ./run_naza.sh
+
+[Naza] boot sequence starting
+[Naza] crypto mode: tri
+[Naza] umask........................ 077
+
+[Naza] runtime
+  Python............................ PASS
+  cryptography...................... PASS
+  llama_cpp......................... PASS
+  aiosqlite......................... PASS
+  httpx............................. PASS
+
+[Naza] supply-chain gate
+  hash-locked requirements.......... PASS
+  liboqs archive SHA256............. PASS
+  liboqs-python archive SHA256...... PASS
+  verification-before-extract....... PASS
+
+[Naza] Open Quantum Safe
+  liboqs 0.14.0..................... READY
+  ML-KEM-1024....................... READY
+  HQC-256........................... READY
+
+[Naza] NKEY4
+  hardware fingerprint.............. AVAILABLE
+  PBKDF2............................ READY
+  HKDF-SHA512....................... READY
+  PROTECTOR......................... DERIVED
+
+[Naza] SpookyNaza tri-hybrid
+  ML-KEM-1024....................... AUTHENTICATED
+  HQC-256........................... AUTHENTICATED
+  X25519............................ AUTHENTICATED
+  transcript binding................ PASS
+  AES-256-GCM....................... PASS
+
+[Naza] DATA_KEY..................... RECOVERED
+
+[Naza] model
+  encrypted GGUF.................... FOUND
+  AES-GCM........................... PASS
+  plaintext SHA256.................. PASS
+  execution gate.................... OPEN
+
+[Naza] encrypted history............ PASS
+[Naza] rotation journal............. CLEAN
+
+BOOT RESULT......................... PASS
+```
+
+The tri-hybrid envelope actually derives its root from a PQ-derived seed lane plus an X25519 lane, bound to a SHA-512 transcript, before AES-GCM unwraps the payload.
+
+---
+
+# SECRET DEPENDENCY SIMULATION
+
+```text
+hardware_fingerprint
+       │
+       ├── PBKDF2 / optional passphrase
+       │
+       ▼
+      KEK
+       │
+       ▼
+   PROTECTOR
+       │
+       ├──────────── seals ML-KEM private material
+       ├──────────── seals HQC private material
+       └──────────── seals X25519 private material
+                         │
+               ┌─────────┴──────────┐
+               │                    │
+          PQ combined seed      X25519 secret
+               │                    │
+               └──── HKDF-SHA512 ───┘
+                         │
+                      ROOT_KEY
+                         │
+                    AES-256-GCM
+                         │
+                      DATA_KEY
+```
+
+```text
+KNOWN HARDWARE FINGERPRINT ONLY
+        ↓
+DATA_KEY recovered?................ NO
+
+KNOWN .enc_key ONLY
+        ↓
+DATA_KEY recovered?................ NO
+
+KNOWN fingerprint + .enc_key
+machine-only exact environment
+        ↓
+potential protector reconstruction. YES
+
+strong independent passphrase
+not known to attacker
+        ↓
+protector reconstruction............ REJECTED
+```
+
+So the fingerprint itself is **not** equivalent to `DATA_KEY`.
+
+---
+
+# MODEL-INTEGRITY FAULT MATRIX
+
+```text
+Correct model
+  DETECTED:       valid
+  RESULT:         ACCEPT
+
+Single-bit plaintext corruption
+  SHA256 mismatch
+  RESULT:         REJECT / FAIL-CLOSED
+
+Malicious replacement GGUF
+  SHA256 mismatch
+  RESULT:         REJECT / FAIL-CLOSED
+
+Interrupted download
+  incomplete .part
+  RESULT:         REJECT / RECOVERABLE
+
+Partial download
+  SHA256 mismatch
+  RESULT:         REJECT / FAIL-CLOSED
+
+Wrong EXPECTED_HASH
+  valid model != pin
+  RESULT:         REJECT / FAIL-CLOSED
+
+Symlink model substitution
+  path validation
+  RESULT:         REJECT
+
+Encrypted-model ciphertext modification
+  AES-GCM authentication
+  RESULT:         REJECT
+
+Authentication-tag corruption
+  AES-GCM authentication
+  RESULT:         REJECT
+
+Plaintext replacement immediately before Llama()
+  second model hash check
+  RESULT:         REJECT / FAIL-CLOSED
+```
+
+This closes the earlier model-integrity bypass in the simulated path.
+
+---
+
+# STORAGE / ROTATION CRASH SIMULATION
+
+The storage implementation creates private random temporary files using `O_EXCL|O_NOFOLLOW`, mode `0600`, fsyncs the file, replaces atomically, and fsyncs the parent directory. Rotation keeps encrypted backups and a commit journal.
+
+```text
+Crash before journal creation
+  → OLD STATE CONSISTENT
+
+Crash during backups
+  → OLD STATE CONSISTENT / RECOVERABLE
+
+Crash during preparation
+  → OLD STATE CONSISTENT / RECOVERABLE
+
+Crash after manifest committed=false
+  → RECOVERY ROLLS BACK
+
+Crash after first target replacement
+  → PARTIAL TEMPORARY STATE
+  → RECOVERY ROLLS BACK
+  → OLD STATE CONSISTENT
+
+Crash between replacements
+  → RECOVERY ROLLS BACK
+  → OLD STATE CONSISTENT
+
+Crash before committed=true
+  → RECOVERY ROLLS BACK
+
+Crash immediately after committed=true
+  → NEW STATE CONSISTENT
+
+Crash during journal deletion
+  → committed marker retained
+  → NEW STATE CONSISTENT
+  → stale journal cleaned next recovery
+```
+
+Simulation collapse:
+
+```text
+ATOMIC WRITE......................... PASS
+SYMLINK DEFENSE...................... PASS
+ROTATION ROLLBACK.................... PASS
+DURABILITY DESIGN.................... PASS
+```
+
+---
+
+# ADVERSARIAL COLLAPSE
+
+```text
+wrong passphrase..................... REJECT
+repeated bad passphrase.............. REJECT
+copied encrypted model only.......... REJECT key recovery
+copied history only.................. REJECT key recovery
+known fingerprint alone.............. REJECT
+partial fingerprint.................. REJECT
+expired Termux token................. REJECT
+modified NKEY4 header................ REJECT
+modified ML-KEM ciphertext........... REJECT
+modified HQC ciphertext.............. REJECT
+modified KEM encrypted private key... REJECT
+modified X25519 public key............ REJECT
+modified AES ciphertext.............. REJECT
+modified GCM tag..................... REJECT
+truncated envelope................... REJECT
+oversized envelope................... REJECT
+duplicate JSON keys.................. REJECT
+invalid Base64....................... REJECT
+wrong algorithm name................. REJECT
+missing ML-KEM....................... REJECT
+missing HQC.......................... REJECT
+malformed rotation journal........... REJECT
+journal symlink...................... REJECT
+```
+
+`spooky_combiner.py` explicitly rejects duplicate JSON keys, unexpected fields/algorithms, malformed Base64 and oversized objects, and funnels authentication failures through a generic error path.
+
+---
+
+# CRYPTO FUTURES
+
+```text
+FUTURE-A
+All current primitives remain secure
+→ DATA_KEY protected
+RESULT: SURVIVES
+
+FUTURE-B
+X25519 catastrophically broken
+PQ seed remains unknown
+→ ROOT_KEY still requires PQ contribution
+RESULT: SURVIVES
+
+FUTURE-C
+ML-KEM-1024 catastrophically broken
+HQC lane survives
+→ PQ combiner retains surviving contribution
+RESULT: SURVIVES under combiner assumptions
+
+FUTURE-D
+HQC-256 catastrophically broken
+ML-KEM lane survives
+RESULT: SURVIVES under combiner assumptions
+
+FUTURE-E
+X25519 + one PQ primitive broken
+one independent PQ contribution remains
+RESULT: SURVIVES under robust-combiner assumption
+
+FUTURE-F
+both PQ algorithms broken
+X25519 survives
+→ PQ-derived seed potentially reconstructible
+→ X25519 contribution remains
+RESULT: SURVIVES under root-composition assumptions
+
+FUTURE-G
+X25519 broken
+both PQ algorithms survive
+RESULT: SURVIVES
+
+FUTURE-H
+SHA-256 collision resistance weakens
+→ model/supply-chain integrity margin degrades
+→ does not immediately disclose DATA_KEY
+RESULT: DEGRADED
+
+FUTURE-I
+HKDF-SHA512 catastrophically compromised
+→ central combiner/KDF assumption fails
+RESULT: FAIL
+
+FUTURE-J
+AES-256-GCM catastrophically compromised
+→ confidentiality/authentication layer fails
+RESULT: FAIL
+```
+
+This is not claiming that the custom combiner has a formal robust-combiner security proof. The repository itself labels the construction **experimental research code, not a NIST standard and not for production security**.
+
+---
+
+# HYPER-TIME BRANCHES
+
+```text
+T+1 minute
+normal boot + valid artifacts
+→ SURVIVES
+
+T+1 hour
+download corruption / interruption
+→ FAIL-CLOSED
+→ SURVIVES
+
+T+1 day
+wrong-password / ciphertext tampering
+→ REJECT
+→ SURVIVES
+
+T+30 days
+dependency index changes
+→ existing committed hashes unchanged
+→ SURVIVES for reproducibility
+→ regenerating lock can produce new transitive versions
+
+T+1 year
+Python/dependency API drift
+→ COMPATIBILITY RISK
+→ confidentiality not inherently broken
+
+T+5 years
+one hybrid primitive assumed compromised
+→ surviving independent lane generally prevents direct root reconstruction
+→ SURVIVES under stated KDF/combiner assumptions
+
+T+10 years
+multiple primitive/API/platform changes
+→ CRYPTO-AGILITY and recovery become dominant risks
+```
+
+---
+
+# 1,000 CONCEPTUAL FUTURES
+
+These are **fault-discovery branches, not probability estimates**.
+
+```text
+1000 conceptual branches exercised
+
+Dominant failure clusters:
+
+1. platform/fingerprint drift
+2. dependency/API incompatibility
+3. operator loss of passphrase/token
+4. filesystem/device failure
+5. future primitive break
+6. supply-chain trust-anchor compromise
+7. custom-combiner correctness assumptions
+```
+
+No statistical security probability is inferred from the number of surviving branches.
+
+---
+
+# HYPER-TIME SECURITY REPORT
+
+```text
+CURRENT STATE:
+SAFE-ENOUGH-FOR-EXPERIMENTAL-USE
+
+CONFIDENTIALITY ........ 88 / 100
+INTEGRITY .............. 91 / 100
+AVAILABILITY ........... 77 / 100
+SUPPLY-CHAIN ........... 79 / 100
+RECOVERY ............... 86 / 100
+CRYPTO-AGILITY ......... 76 / 100
+```
+
+### Genuine remaining findings
+
+**HIGH: none identified from this simulation/static pass.**
+
+**MEDIUM — PQ lock lacks an independent trust anchor.** The workflow creates the signing key and public key together during each generation. An attacker who can replace the complete generated artifact set could generate their own valid signature/public-key pair. This affects provenance/supply-chain integrity, not the runtime encryption directly. Recommended fix: keep a long-lived verification public key pinned independently of the generated lock artifacts, ideally with the signing private key outside the repository/runner. Regression test: replace manifest+signature while keeping the independently pinned public key fixed and require verification failure.
+
+**MEDIUM — machine-binding availability.** A hardware-derived protector is useful for local binding, but machine-only configurations remain sensitive to changes in fingerprint inputs. The principal simulated consequence is loss of access rather than automatic confidentiality compromise.
+
+**MEDIUM — experimental cryptographic construction.** The PQ combiner and tri-hybrid construction are bespoke research designs. Their implementation has sensible transcript binding, domain separation and authenticated encryption, but static review/simulation cannot substitute for cryptanalysis. The source itself makes the same production-security limitation explicit.
+
+**LOW — CI bootstrap dependencies are not fully immutable.** The workflow upgrades pip and installs `pip-tools` without pinning an exact artifact hash, while GitHub Actions are referenced by release tags such as `actions/checkout@v4`. This leaves some CI-generation infrastructure outside the lock's immutable boundary.
+
+---
+
+```text
+SURVIVED FUTURES
+────────────────────────────────────
+model corruption
+model substitution
+partial downloads
+ciphertext tampering
+GCM-tag corruption
+malformed PQ envelopes
+single KEM failures
+X25519-only failure
+rotation interruptions
+journal cleanup interruption
+symlink attempts
+wrong credentials
+dependency drift with existing lock
+
+FAILED FUTURES
+────────────────────────────────────
+catastrophic HKDF-SHA512 assumption failure
+catastrophic AES-256-GCM assumption failure
+loss of all material necessary to reconstruct the local protector
+certain machine-binding changes without recovery credentials
+complete compromise of every independent cryptographic contribution
+trusted-build/signing infrastructure compromise
+```
+
+### Simulation collapse
+
+```text
+BOOT........................ PASS
+PQ BACKEND.................. PASS
+HASH-LOCK................... PASS
+PQ LOCK SELF-VERIFY......... PASS
+MODEL FAIL-CLOSED........... PASS
+NKEY4....................... PASS
+TRI-HYBRID.................. PASS*
+STORAGE RECOVERY............ PASS
+TAMPER REJECTION............ PASS
+
+SIMULATED CURRENT VERDICT:
+SAFE-ENOUGH-FOR-EXPERIMENTAL-USE
+
+* experimental/unvalidated construction
+```
+
