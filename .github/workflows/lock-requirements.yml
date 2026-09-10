@@ -7,6 +7,9 @@ on:
       - requirements.in
       - .github/workflows/lock-requirements.yml
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
 jobs:
   lock_and_pq_sign:
     runs-on: ubuntu-latest
@@ -20,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Install system tools
         run: |
@@ -192,7 +195,7 @@ jobs:
           ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
 
       - name: Upload lock + PQ materials
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: pq-locked-requirements
           path: |
