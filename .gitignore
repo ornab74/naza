@@ -1,5 +1,21 @@
+.venv/
 venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.local/
 models/
 .enc_key
 chat_history.db.aes
-__pycache__/
+chat_history.db.aes.mac
+naza.lock.json
+.spooky_combiner_1.lab
+*.tmp
+
+# Local/generated state
+*.so
+*.a
+*.o
+src/
+.naza/
+chat_history.db*

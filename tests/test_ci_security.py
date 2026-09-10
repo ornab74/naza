@@ -2,9 +2,7 @@ import re
 import unittest
 from pathlib import Path
 
-
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "lock-requirements.yml"
-
 
 class CiSupplyChainTests(unittest.TestCase):
     def test_liboqs_archive_is_verified_before_extraction(self):
@@ -20,7 +18,6 @@ class CiSupplyChainTests(unittest.TestCase):
     def test_workflow_change_triggers_lock_job(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("- .github/workflows/lock-requirements.yml", workflow)
-
 
 if __name__ == "__main__":
     unittest.main()
