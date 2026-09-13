@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Required Termux keystore -> Ubuntu proot -> SpookyNaza + pinned liboqs.
 set -euo pipefail
+umask 077
 
 NAZA_REF="${NAZA_REF:-main}"
 REPO_URL="${NAZA_REPO_URL:-https://github.com/ornab74/naza.git}"
@@ -9,9 +10,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
+[[ "$KEY_ALIAS" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "invalid keystore alias"
+[[ "$REPO_URL" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+$ ]] || \
+  fail "NAZA_REPO_URL must be an HTTPS GitHub repository URL"
+[[ "$NAZA_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] || fail "invalid NAZA_REF"
+[[ "$NAZA_REF" != *..* && "$NAZA_REF" != *//* && "$NAZA_REF" != *@\{* ]] || fail "unsafe NAZA_REF"
+
 printf '\n==> Updating Termux and installing required host packages\n'
 pkg update -y
-pkg upgrade -y
 pkg install -y git curl coreutils proot-distro termux-api xxd
 
 command -v termux-keystore >/dev/null 2>&1 || \
@@ -51,22 +57,30 @@ mkdir -p "$PROOT_TMP_DIR"
 printf '\n==> Installing SpookyNaza + pinned liboqs inside Ubuntu\n'
 proot-distro login ubuntu -- env NAZA_REF="$NAZA_REF" NAZA_REPO_URL="$REPO_URL" bash <<'PROOT_EOF'
 set -euo pipefail
+umask 077
 export DEBIAN_FRONTEND=noninteractive
 apt update
-apt upgrade -y
 apt install -y \
   sudo git curl ca-certificates build-essential cmake ninja-build pkg-config libssl-dev \
   python3 python3-pip python3-venv python3-dev
 
 id -u sudouser >/dev/null 2>&1 || adduser --disabled-password --gecos "" sudouser
 
-cat > /tmp/naza-proot-install.sh <<'INNER_EOF'
+INSTALL_DIR="$(mktemp -d /tmp/naza-install.XXXXXX)"
+INSTALL_SCRIPT="$INSTALL_DIR/install.sh"
+trap 'rm -rf -- "$INSTALL_DIR"' EXIT
+cat > "$INSTALL_SCRIPT" <<'INNER_EOF'
 set -euo pipefail
+umask 077
 APP_DIR="$HOME/naza"
 REPO_URL="${NAZA_REPO_URL:-https://github.com/ornab74/naza.git}"
 NAZA_REF="${NAZA_REF:-main}"
 
 if [ -d "$APP_DIR/.git" ]; then
+  [ "$(git -C "$APP_DIR" remote get-url origin)" = "$REPO_URL" ] || {
+    echo "ERROR: existing checkout origin does not match NAZA_REPO_URL" >&2
+    exit 1
+  }
   git -C "$APP_DIR" fetch --prune origin "$NAZA_REF"
 else
   rm -rf "$APP_DIR"
@@ -75,26 +89,25 @@ else
 fi
 # Resolve the requested ref now and detach so the installed tree cannot drift silently.
 git -C "$APP_DIR" checkout --detach FETCH_HEAD
+[ "$(git -C "$APP_DIR" rev-parse HEAD)" = "$(git -C "$APP_DIR" rev-parse FETCH_HEAD)" ] || {
+  echo "ERROR: checkout does not match fetched revision" >&2
+  exit 1
+}
 
 python3 -m venv "$APP_DIR/venv"
 . "$APP_DIR/venv/bin/activate"
-python -m pip install --upgrade pip setuptools wheel
-
-if [ -f "$APP_DIR/requirements.txt" ]; then
-  python -m pip install --require-hashes -r "$APP_DIR/requirements.txt"
-elif [ -f "$APP_DIR/requirements.in" ]; then
-  python -m pip install -r "$APP_DIR/requirements.in"
-else
-  python -m pip install \
-    'llama-cpp-python==0.3.1' 'httpx==0.28.0' 'aiosqlite==0.21.0' 'cryptography==46.0.1'
-fi
+[ -f "$APP_DIR/bootstrap-requirements.txt" ] || { echo "ERROR: missing bootstrap lock" >&2; exit 1; }
+[ -f "$APP_DIR/requirements.txt" ] || { echo "ERROR: missing application lock" >&2; exit 1; }
+python -m pip install --require-hashes -r "$APP_DIR/bootstrap-requirements.txt"
+python -m pip install --require-hashes -r "$APP_DIR/requirements.txt"
 
 chmod +x "$APP_DIR/install_liboqs_0.14.0.sh" "$APP_DIR/run_naza.sh"
 export PYTHON_BIN="$APP_DIR/venv/bin/python"
 "$APP_DIR/install_liboqs_0.14.0.sh"
 
 export OQS_INSTALL_PATH="$HOME/.local/liboqs-0.14.0"
-export LD_LIBRARY_PATH="$OQS_INSTALL_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+unset LD_PRELOAD PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
+export LD_LIBRARY_PATH="$OQS_INSTALL_PATH/lib"
 export NAZA_CRYPTO_MODE=tri
 "$APP_DIR/venv/bin/python" - <<'PY'
 import oqs
@@ -106,10 +119,12 @@ if missing:
 print("SpookyNaza default verified: tri-hybrid NKEY4 + ML-KEM-1024 + HQC-256 + X25519")
 PY
 INNER_EOF
-chmod 700 /tmp/naza-proot-install.sh
-chown sudouser:sudouser /tmp/naza-proot-install.sh
-su - sudouser -c "NAZA_REF='$NAZA_REF' NAZA_REPO_URL='$NAZA_REPO_URL' bash /tmp/naza-proot-install.sh"
-rm -f /tmp/naza-proot-install.sh
+chmod 700 "$INSTALL_DIR" "$INSTALL_SCRIPT"
+chown -R sudouser:sudouser "$INSTALL_DIR"
+runuser -u sudouser -- env \
+  NAZA_REF="$NAZA_REF" \
+  NAZA_REPO_URL="$NAZA_REPO_URL" \
+  bash "$INSTALL_SCRIPT"
 PROOT_EOF
 
 if ! grep -q '^# === BEGIN NAZA AUTO-START ===$' "$HOME/.bashrc" 2>/dev/null; then

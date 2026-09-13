@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Termux-only required biometric + Android keystore unlock token.
 set -euo pipefail
+umask 077
 HOME_T="${HOME:-/data/data/com.termux/files/home}"
 NAZA_DIR="$HOME_T/.naza"
 ALIAS="${NAZA_KEYSTORE_ALIAS:-naza-unlock}"
@@ -8,7 +9,12 @@ CHALLENGE="$NAZA_DIR/challenge"
 TOKEN="$NAZA_DIR/unlock.token"
 ALGO="${NAZA_SIGN_ALGO:-SHA256withRSA}"
 
+[[ "$ALIAS" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "ERROR: invalid keystore alias" >&2; exit 1; }
+[ "$ALGO" = "SHA256withRSA" ] || { echo "ERROR: unsupported signing algorithm" >&2; exit 1; }
+
 mkdir -p "$NAZA_DIR"
+[ ! -L "$NAZA_DIR" ] || { echo "ERROR: unsafe Naza control directory" >&2; exit 1; }
+[ "$(stat -c %u "$NAZA_DIR")" = "$(id -u)" ] || { echo "ERROR: Naza control directory has wrong owner" >&2; exit 1; }
 chmod 700 "$NAZA_DIR" 2>/dev/null || true
 command -v termux-fingerprint >/dev/null 2>&1 || { echo "ERROR: termux-fingerprint unavailable" >&2; exit 1; }
 command -v termux-keystore >/dev/null 2>&1 || { echo "ERROR: termux-keystore unavailable" >&2; exit 1; }
@@ -17,15 +23,20 @@ termux-keystore list 2>/dev/null | grep -Fq "$ALIAS" || {
   exit 1
 }
 
-if [ ! -f "$CHALLENGE" ]; then
-  dd if=/dev/urandom bs=32 count=1 status=none | xxd -p -c 64 > "$CHALLENGE"
-  chmod 600 "$CHALLENGE"
-fi
-
 AUTH="$(termux-fingerprint -t Naza -s Unlock -d 'Unlock Naza' | tr -d '\r')"
 printf '%s\n' "$AUTH" | grep -q 'AUTH_RESULT_SUCCESS' || { echo "Fingerprint failed." >&2; exit 1; }
+CHALLENGE_TMP="$(mktemp "$NAZA_DIR/.challenge.XXXXXX")"
+trap 'rm -f -- "${CHALLENGE_TMP:-}" "${TOKEN_TMP:-}" "$CHALLENGE"' EXIT
+dd if=/dev/urandom bs=32 count=1 status=none | xxd -p -c 64 > "$CHALLENGE_TMP"
+chmod 600 "$CHALLENGE_TMP"
+mv -f -- "$CHALLENGE_TMP" "$CHALLENGE"
+grep -Eq '^[0-9a-f]{64}$' "$CHALLENGE" || { echo "ERROR: invalid challenge file" >&2; exit 1; }
 SIG="$(termux-keystore sign "$ALIAS" "$ALGO" < "$CHALLENGE" | tr -d '\r\n ')"
 [ "${#SIG}" -ge 32 ] || { echo "Keystore signing failed." >&2; exit 1; }
-printf '%s\n' "$(printf '%s' "$SIG" | sha256sum | awk '{print $1}')" > "$TOKEN"
-chmod 600 "$TOKEN"
+TOKEN_TMP="$(mktemp "$NAZA_DIR/.unlock.token.XXXXXX")"
+trap 'rm -f -- "${CHALLENGE_TMP:-}" "${TOKEN_TMP:-}"' EXIT
+printf '%s%s' "$(cat "$CHALLENGE")" "$SIG" | sha256sum | awk '{print $1}' > "$TOKEN_TMP"
+chmod 600 "$TOKEN_TMP"
+mv -f -- "$TOKEN_TMP" "$TOKEN"
+rm -f -- "$CHALLENGE"
 echo "Naza unlock token ready."

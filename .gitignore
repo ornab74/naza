@@ -18,4 +18,5 @@ naza.lock.json
 *.o
 src/
 .naza/
+.naza-private-tmp/
 chat_history.db*

@@ -13,6 +13,17 @@ import shutil
 import stat
 
 
+def private_directory(path):
+    path = Path(path)
+    st = os.stat(str(path), follow_symlinks=False)
+    if not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f'Refusing non-directory storage root: {path}')
+    if st.st_uid != os.geteuid():
+        raise PermissionError(f'Storage directory is owned by another user: {path}')
+    if st.st_mode & 0o022:
+        raise PermissionError(f'Storage directory is group/other writable: {path}')
+
+
 def sync_dir(path):
     fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -22,12 +33,45 @@ def sync_dir(path):
 
 
 def regular(path):
-    if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.stat().st_mode)):
+    try:
+        mode = os.lstat(str(path)).st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
         raise ValueError(f'Refusing non-regular file: {path}')
+
+
+def read_regular(path, maximum=None):
+    """Read a regular file without following its final path component."""
+    path = Path(path)
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f'Refusing non-regular file: {path}')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            data = stream.read() if maximum is None else stream.read(maximum + 1)
+        if maximum is not None and len(data) > maximum:
+            raise ValueError(f'File exceeds maximum size: {path}')
+        return data
+    finally:
+        os.close(fd)
+
+
+def read_private(path, maximum=None):
+    """Read a current-user-owned regular file with no group/other access."""
+    path = Path(path)
+    st = os.stat(str(path), follow_symlinks=False)
+    if st.st_uid != os.geteuid():
+        raise PermissionError(f'File is owned by another user: {path}')
+    if st.st_mode & 0o077:
+        raise PermissionError(f'File is readable or writable by group/other: {path}')
+    return read_regular(path, maximum)
 
 
 def atomic_write(path, data):
     path = Path(path)
+    private_directory(path.parent)
     regular(path)
     tmp = path.with_name(path.name + '.' + secrets.token_hex(8) + '.tmp')
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -46,8 +90,17 @@ def atomic_write(path, data):
 @contextlib.contextmanager
 def _locked(root):
     root = Path(root)
-    fd = os.open(str(root / '.naza-rotation.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    private_directory(root)
+    lock = root / '.naza-rotation.lock'
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f'Refusing non-regular lock file: {lock}')
+        if st.st_uid != os.geteuid():
+            raise PermissionError(f'Lock file is owned by another user: {lock}')
+        if st.st_mode & 0o077:
+            raise PermissionError(f'Lock file has unsafe permissions: {lock}')
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield root / '.naza-rotation'
     finally:
@@ -70,7 +123,7 @@ def _recover(journal, targets):
         # Preparation did not finish; no live files were replaced.
         _cleanup(journal)
         return False
-    record = json.loads(manifest.read_bytes())
+    record = json.loads(read_regular(manifest, 64 * 1024))
     expected = [str(Path(p).absolute()) for p in targets]
     if (record.get('version') != 1 or record.get('targets') != expected
             or type(record.get('committed')) is not bool
@@ -90,7 +143,7 @@ def _recover(journal, targets):
         for i, existed in enumerate(record['existed']):
             path = Path(targets[i])
             if existed:
-                atomic_write(path, (journal / f'{i}.old').read_bytes())
+                atomic_write(path, read_regular(journal / f'{i}.old'))
             elif path.exists():
                 path.unlink()
                 sync_dir(path.parent)
@@ -127,7 +180,7 @@ def replace_batch(root, targets, prepare):
                 regular(path)
                 existed.append(path.exists())
                 if path.exists():
-                    atomic_write(journal / f'{i}.old', path.read_bytes())
+                    atomic_write(journal / f'{i}.old', read_regular(path))
             count = 0
             for i, blob in enumerate(prepare()):
                 if i >= len(targets):
@@ -142,7 +195,7 @@ def replace_batch(root, targets, prepare):
             for i, path in enumerate(targets):
                 staged = journal / f'{i}.new'
                 if staged.exists():
-                    atomic_write(path, staged.read_bytes())
+                    atomic_write(path, read_regular(staged))
                 elif path.exists():
                     path.unlink()
                     sync_dir(path.parent)
@@ -153,7 +206,7 @@ def replace_batch(root, targets, prepare):
             # If the commit marker is already visible, keep the complete new set
             # and report success so the caller switches to its new in-memory key.
             manifest = journal / 'manifest.json'
-            committed = manifest.exists() and json.loads(manifest.read_bytes()).get('committed') is True
+            committed = manifest.exists() and json.loads(read_regular(manifest, 64 * 1024)).get('committed') is True
             _recover(journal, targets)
             if not committed:
                 raise

@@ -9,9 +9,6 @@ on:
       - bootstrap-requirements.txt
       - .github/workflows/lock-requirements.yml
 
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-
 # Required for GitHub/Sigstore provenance. The attestation binds the generated
 # lock artifacts to this repository and workflow identity independently of the
 # self-contained experimental PQ signature.

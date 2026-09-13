@@ -2,6 +2,7 @@
 # Naza/SpookyNaza pinned Open Quantum Safe backend installer.
 # Downloads are cryptographically verified before extraction or installation.
 set -euo pipefail
+umask 077
 
 LIBOQS_VER="0.14.0"
 LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VER}.tar.gz"
@@ -91,7 +92,8 @@ curl --fail --show-error --location --proto '=https' --tlsv1.2 \
 verify_sha256 "$PY_TARBALL" "$LIBOQS_PY_SHA256" "liboqs-python ${LIBOQS_PY_REF} archive"
 
 export OQS_INSTALL_PATH="$PREFIX"
-export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+unset LD_PRELOAD PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
+export LD_LIBRARY_PATH="${PREFIX}/lib"
 
 # Deliberately no --user: when Naza's venv is active, install into that venv.
 "$PYTHON_BIN" -m pip install --no-deps --force-reinstall "$PY_TARBALL"
@@ -109,7 +111,7 @@ PY
 
 cat > "${PREFIX}/naza-oqs.env" <<ENV
 export OQS_INSTALL_PATH='${PREFIX}'
-export LD_LIBRARY_PATH='${PREFIX}/lib':\${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH='${PREFIX}/lib'
 ENV
 chmod 600 "${PREFIX}/naza-oqs.env"
 

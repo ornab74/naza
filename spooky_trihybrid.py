@@ -16,6 +16,12 @@ MAGIC = b"SPK3\n"
 SUITE = b"SpookyNaza-1/ML-KEM-1024+HQC-256+X25519/HKDF-SHA512/AES-256-GCM"
 MAX_ENVELOPE = sc.MAX_ENVELOPE + 8192
 ERROR = "SpookyNaza tri-hybrid authentication failed"
+MAX_CONTEXT = 1024
+
+
+def _check_context(context):
+    if not isinstance(context, bytes) or not 1 <= len(context) <= MAX_CONTEXT:
+        raise ValueError("context must contain 1 to 1024 bytes")
 
 
 def _public(key):
@@ -31,6 +37,7 @@ def create_envelope(payload, protector, oqs_module, context=b""):
         raise ValueError("payload length out of range")
     if not isinstance(protector, bytes) or len(protector) != 32:
         raise ValueError("protector must be 32 bytes")
+    _check_context(context)
     seed = os.urandom(32)
     spooky = sc.create_envelope(seed, protector, oqs_module)
     recipient, sender = X25519PrivateKey.generate(), X25519PrivateKey.generate()
@@ -51,6 +58,7 @@ def open_envelope(blob, protector, oqs_module, context=b""):
             raise ValueError()
         if not isinstance(protector, bytes) or len(protector) != 32:
             raise ValueError()
+        _check_context(context)
         size = struct.unpack(">I", blob[5:9])[0]
         end = 9 + size
         if not 0 < size <= sc.MAX_ENVELOPE or not end + 64 + 60 + 29 <= len(blob) <= end + 64 + 60 + 28 + sc.MAX_PAYLOAD:

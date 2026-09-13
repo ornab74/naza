@@ -35,8 +35,10 @@ class RotationTests(unittest.TestCase):
         exec(compile(subset, 'main.py', 'exec'), self.ns)
         self.old = os.urandom(32)
         self.ns['KEY_PATH'].write_bytes(b'original envelope')
+        self.ns['KEY_PATH'].chmod(0o600)
         for path in (self.ns['ENCRYPTED_MODEL'], self.ns['DB_PATH']):
             path.write_bytes(self.ns['aes_encrypt'](b'private ' + path.name.encode(), self.old))
+            path.chmod(0o600)
         self.before = {p: p.read_bytes() for p in Path('.').iterdir()}
 
     def tearDown(self):
@@ -65,6 +67,7 @@ class RotationTests(unittest.TestCase):
 
     def test_bad_mac_aborts_before_replacing_data(self):
         Path('model.aes.mac').write_bytes(b'bad tag')
+        Path('model.aes.mac').chmod(0o600)
         with self.assertRaisesRegex(ValueError, 'MAC'):
             self.ns['rotate_data_key'](self.old, 'gate')
         for path, content in self.before.items():

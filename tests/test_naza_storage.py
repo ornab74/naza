@@ -115,6 +115,33 @@ s.replace_batch(root, targets, lambda: iter([b'new-data', b'new-key', b'new-mac'
             store.atomic_write(alias, b'bad')
         self.assert_old()
 
+    def test_read_regular_rejects_fifo(self):
+        fifo = self.root / 'input.fifo'
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, 'non-regular'):
+            store.read_regular(fifo)
+
+    def test_read_regular_enforces_size_limit(self):
+        oversized = self.root / 'manifest.json'
+        oversized.write_bytes(b'x' * 32)
+        oversized.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, 'maximum size'):
+            store.read_regular(oversized, 16)
+
+    def test_read_regular_rejects_public_permissions(self):
+        public = self.root / 'public-secret'
+        public.write_bytes(b'secret')
+        public.chmod(0o644)
+        with self.assertRaisesRegex(PermissionError, 'group/other'):
+            store.read_private(public)
+
+    def test_atomic_write_rejects_world_writable_parent(self):
+        unsafe = self.root / 'unsafe'
+        unsafe.mkdir(mode=0o700)
+        unsafe.chmod(0o777)
+        with self.assertRaisesRegex(PermissionError, 'group/other writable'):
+            store.atomic_write(unsafe / 'secret', b'data')
+
 
 if __name__ == '__main__':
     unittest.main()

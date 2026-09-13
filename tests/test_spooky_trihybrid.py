@@ -10,6 +10,7 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import spooky_combiner as sc
 import spooky_trihybrid as tri
+import naza_storage as storage
 from test_spooky_combiner import FakeOQS
 
 
@@ -39,9 +40,15 @@ class TriHybridTests(unittest.TestCase):
 
     def test_missing_pq_fails_closed(self):
         with self.assertRaises(sc.SpookyCombinerError):
-            tri.create_envelope(self.payload, self.protector, None)
+            tri.create_envelope(self.payload, self.protector, None, self.context)
         with self.assertRaisesRegex(sc.SpookyCombinerError, tri.ERROR):
             tri.open_envelope(self.blob, self.protector, None, self.context)
+
+    def test_context_is_required_and_bounded(self):
+        with self.assertRaises(ValueError):
+            tri.create_envelope(self.payload, self.protector, FakeOQS(), b"")
+        with self.assertRaises(ValueError):
+            tri.create_envelope(self.payload, self.protector, FakeOQS(), b"x" * 1025)
 
     def test_live_key_default_and_no_overwrite_on_failure(self):
         # Load actual key persistence functions without importing the model/TUI dependencies.
@@ -50,10 +57,10 @@ class TriHybridTests(unittest.TestCase):
         subset = ast.Module(body=[n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names], type_ignores=[])
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / '.enc_key'
-            scope = dict(hmac=hmac, Optional=__import__('typing').Optional, os=os, tri=tri, KEY_PATH=path,
+            scope = dict(hmac=hmac, Optional=__import__('typing').Optional, os=os, tri=tri, storage=storage, KEY_PATH=path,
                          KEY_FLAG_PASSPHRASE=1, _OQS=FakeOQS(), AESGCM=AESGCM,
                          _hybrid_kek=lambda salt, pw, lane: sc._hkdf((pw or '').encode(), salt, lane, 32),
-                         _atomic_write_private=lambda p, data: p.write_bytes(data),
+                         _atomic_write_private=lambda p, data: (p.write_bytes(data), p.chmod(0o600)),
                          _assert_private_regular=lambda *a: None, _pw_guard=lambda: None,
                          _pw_ok=lambda: None, _pw_fail=lambda: None, SpookyCombinerError=sc.SpookyCombinerError)
             exec(compile(subset, 'main.py', 'exec'), scope)

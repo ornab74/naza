@@ -36,13 +36,17 @@ except Exception:
 
 MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
 MODEL_FILE = "llama3-small-Q3_K_M.gguf"
+MAX_MODEL_DOWNLOAD = 8 * 1024 * 1024 * 1024
 MODELS_DIR = Path("models")
 MODEL_PATH = MODELS_DIR / MODEL_FILE
 ENCRYPTED_MODEL = MODEL_PATH.with_suffix(MODEL_PATH.suffix + ".aes")
+PRIVATE_TMP_DIR = Path(".naza-private-tmp")
+SESSION_MODEL_PATH = PRIVATE_TMP_DIR / MODEL_FILE
 DB_PATH = Path("chat_history.db.aes")
 KEY_PATH = Path(".enc_key")
 EXPECTED_HASH = "8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+PRIVATE_TMP_DIR.mkdir(mode=0o700, exist_ok=True)
 
 CSI = "\x1b["
 def clear_screen(): sys.stdout.write(CSI + "2J" + CSI + "H")
@@ -106,7 +110,7 @@ def read_menu_choice(num_items:int, prompt="Enter number: ")->int:
         try:
             s = input(prompt).strip()
         except EOFError:
-            continue
+            raise SystemExit("Input stream closed")
         if not s:
             print("Pick a number 1-{}.".format(num_items))
             continue
@@ -128,14 +132,21 @@ def aes_decrypt(data: bytes, key: bytes) -> bytes:
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        if not statmod.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("refusing to hash a non-regular file")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+    finally:
+        os.close(fd)
     return h.hexdigest()
 
 KEY_MAGIC = b"NKEY2"
 KEY_MAGIC3 = b"NKEY3"
 KEY_KDF_ROUNDS = 400_000
+MIN_NEW_PASSPHRASE_LENGTH = 12
 KEY_FLAG_PASSPHRASE = 0x01
 LOCK_PATH = Path("naza.lock.json")
 MAC_SUFFIX = ".mac"
@@ -317,10 +328,7 @@ def _hkdf_sha512(ikm: bytes, salt: bytes, info: bytes, length: int = 32) -> byte
 
 
 def _chmod_private(path: Path):
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+    _assert_private_regular(path, "private file")
 
 
 def _is_symlink(path: Path) -> bool:
@@ -367,6 +375,8 @@ def _assert_private_regular(path: Path, label: str):
     mode = st.st_mode
     if not statmod.S_ISREG(mode):
         raise RuntimeError("{} is not a regular file".format(label))
+    if st.st_uid != os.geteuid():
+        raise RuntimeError("{} is owned by another user".format(label))
     if mode & 0o077:
         os.chmod(str(path), 0o600)
         st = os.lstat(str(path))
@@ -626,7 +636,7 @@ def _mac_key(data_key: bytes) -> bytes:
 def write_file_mac(path: Path, data_key: bytes):
     if not path.exists():
         return
-    raw = path.read_bytes()
+    raw = storage.read_private(path)
     tag = hmac.new(_mac_key(data_key), raw, hashlib.sha256).digest()
     macp = Path(str(path) + MAC_SUFFIX)
     _atomic_write_private(macp, tag)
@@ -638,8 +648,8 @@ def verify_file_mac(path: Path, data_key: bytes) -> bool:
         return False
     if not macp.exists():
         return False  # caller may treat as "no mac yet"
-    raw = path.read_bytes()
-    tag = macp.read_bytes()
+    raw = storage.read_private(path)
+    tag = storage.read_private(macp, 64)
     expect = hmac.new(_mac_key(data_key), raw, hashlib.sha256).digest()
     return hmac.compare_digest(tag, expect)
 
@@ -664,7 +674,7 @@ def load_data_key(passphrase: Optional[str] = None) -> bytes:
     if not KEY_PATH.exists():
         raise FileNotFoundError("no key file")
     _assert_private_regular(KEY_PATH, "key file")
-    blob = KEY_PATH.read_bytes()
+    blob = storage.read_private(KEY_PATH, 1024 * 1024)
     if blob.startswith(b"NKEY4"):
         try:
             if len(blob) > tri.MAX_ENVELOPE + 23 or blob[5:6] != b"\x01" or blob[6] not in (0, KEY_FLAG_PASSPHRASE):
@@ -707,7 +717,7 @@ UNLOCK_CANDIDATES = [
     Path.home() / ".naza" / "unlock.token",
     Path("/root/.naza/unlock.token"),
 ]
-UNLOCK_MAX_AGE = 180.0
+UNLOCK_MAX_AGE = 30.0
 
 
 def read_unlock_token() -> Optional[str]:
@@ -717,13 +727,16 @@ def read_unlock_token() -> Optional[str]:
         if p is None:
             continue
         try:
-            if not p.is_file() or _is_symlink(p):
+            st = os.lstat(str(p))
+            if not statmod.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
                 continue
-            age = now - p.stat().st_mtime
-            if age > UNLOCK_MAX_AGE:
+            if st.st_mode & 0o077:
                 continue
-            raw = p.read_text("utf-8", errors="ignore").strip()
-            if len(raw) >= 32:
+            age = now - st.st_mtime
+            if age < 0 or age > UNLOCK_MAX_AGE:
+                continue
+            raw = storage.read_private(p, 128).decode("ascii").strip()
+            if re.fullmatch(r"[0-9a-f]{64}", raw):
                 return raw
         except Exception:
             continue
@@ -735,8 +748,9 @@ def consume_unlock_token():
         if p is None:
             continue
         try:
-            if p.is_file():
-                p.write_text("")
+            # unlink() removes a symlink itself and never follows it. Do not open
+            # or overwrite a path that may have changed since validation.
+            if os.path.lexists(str(p)):
                 p.unlink()
         except Exception:
             pass
@@ -758,6 +772,11 @@ def derive_key_from_passphrase(pw:str, salt:Optional[bytes]=None) -> Tuple[bytes
     return salt, derived
 
 
+def validate_new_passphrase(passphrase: str) -> None:
+    if len(passphrase) < MIN_NEW_PASSPHRASE_LENGTH:
+        raise ValueError("New passphrase must be at least {} characters".format(MIN_NEW_PASSPHRASE_LENGTH))
+
+
 def ensure_key_interactive() -> bytes:
     token = read_unlock_token()
     if KEY_PATH.exists():
@@ -777,12 +796,16 @@ def ensure_key_interactive() -> bytes:
     print("  3) Termux fingerprint + keystore token gate (no typing in proot)")
     opt = input("Choose (1/2/3): ").strip()
     key = AESGCM.generate_key(256)
-    if opt == "2":
+    if opt == "1":
+        save_wrapped_key(key, None)
+        print("Saved hardware-wrapped key without an additional gate.")
+    elif opt == "2":
         pw = getpass.getpass("Enter passphrase: ")
         pw2 = getpass.getpass("Confirm: ")
-        if pw != pw2:
-            print("Passphrases mismatch.")
+        if not pw or pw != pw2:
+            print("Passphrase is empty or does not match.")
             sys.exit(1)
+        validate_new_passphrase(pw)
         save_wrapped_key(key, pw)
         print("Saved hardware-wrapped key with passphrase gate.")
     elif opt == "3":
@@ -794,8 +817,8 @@ def ensure_key_interactive() -> bytes:
         consume_unlock_token()
         print("Saved key gated by fingerprint token. Unlock from Termux before each boot.")
     else:
-        save_wrapped_key(key, None)
-        print("Saved hardware-wrapped key.")
+        print("Invalid key-protection choice; no key was created.")
+        sys.exit(1)
     return key
 
 def verify_model_integrity(path: Path, expected_sha: str = EXPECTED_HASH) -> str:
@@ -818,9 +841,14 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
     tmp = dest.with_name(dest.name + "." + secrets.token_hex(8) + ".part")
     h = hashlib.sha256()
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
+        request_timeout = timeout if timeout is not None else httpx.Timeout(300.0, connect=30.0)
+        with httpx.stream("GET", url, follow_redirects=True, timeout=request_timeout) as r:
             r.raise_for_status()
+            if r.url.scheme != "https":
+                raise ValueError("model download redirected outside HTTPS")
             total = int(r.headers.get("Content-Length") or 0)
+            if total < 0 or total > MAX_MODEL_DOWNLOAD:
+                raise ValueError("model download exceeds the configured size limit")
             done = 0
             with tmp.open("wb") as f:
                 for chunk in r.iter_bytes(chunk_size=8192):
@@ -828,6 +856,8 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
                     f.write(chunk)
                     h.update(chunk)
                     done += len(chunk)
+                    if done > MAX_MODEL_DOWNLOAD:
+                        raise ValueError("model download exceeds the configured size limit")
                     if total and show_progress:
                         pct = done / total * 100
                         bar = int(pct // 2)
@@ -859,7 +889,7 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
 def encrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔐 Encrypting {src} -> {dest}")
     _assert_private_regular(src, "plaintext input")
-    data = src.read_bytes()
+    data = storage.read_private(src)
     start = time.time()
     enc = aes_encrypt(data, key)
     _atomic_write_private(dest, enc)
@@ -873,7 +903,7 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     macp = Path(str(src) + MAC_SUFFIX)
     if macp.exists() and not verify_file_mac(src, key):
         raise ValueError("encrypted file MAC check failed")
-    enc = src.read_bytes()
+    enc = storage.read_private(src)
     data = aes_decrypt(enc, key)
     _atomic_write_private(dest, data)
     if not macp.exists():
@@ -881,21 +911,37 @@ def decrypt_file(src: Path, dest: Path, key: bytes):
     print(f"Decrypted ({len(data)} bytes)")
 
 def _history_temp() -> Path:
-    return Path("." + secrets.token_hex(10) + ".db")
+    return PRIVATE_TMP_DIR / (secrets.token_hex(10) + ".db")
+
+
+def cleanup_private_temps():
+    storage.private_directory(PRIVATE_TMP_DIR)
+    for path in PRIVATE_TMP_DIR.iterdir():
+        secure_unlink(path)
+        if os.path.lexists(str(path)):
+            raise RuntimeError("Could not remove private temporary artifact: {}".format(path))
 
 
 async def init_db(key: bytes):
-    if not DB_PATH.exists():
-        dec = _history_temp()
-        try:
-            async with aiosqlite.connect(dec) as db:
-                await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
-                await db.commit()
-            write_private = dec.read_bytes()
-            _atomic_write_private(DB_PATH, aes_encrypt(write_private, key))
+    if DB_PATH.exists():
+        _assert_private_regular(DB_PATH, "encrypted history")
+        macp = Path(str(DB_PATH) + MAC_SUFFIX)
+        if macp.exists() and not verify_file_mac(DB_PATH, key):
+            raise ValueError("encrypted history MAC check failed")
+        aes_decrypt(storage.read_private(DB_PATH), key)
+        if not macp.exists():
             write_file_mac(DB_PATH, key)
-        finally:
-            secure_unlink(dec)
+        return
+    dec = _history_temp()
+    try:
+        async with aiosqlite.connect(dec) as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, prompt TEXT, response TEXT)")
+            await db.commit()
+        write_private = storage.read_private(dec)
+        _atomic_write_private(DB_PATH, aes_encrypt(write_private, key))
+        write_file_mac(DB_PATH, key)
+    finally:
+        secure_unlink(dec)
 
 async def log_interaction(prompt: str, response: str, key: bytes):
     dec = _history_temp()
@@ -1951,16 +1997,15 @@ def model_manager(state:dict):
 
 async def chat_session(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found. Please download & encrypt first."); input("Enter..."); return
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    decrypt_file(ENCRYPTED_MODEL, SESSION_MODEL_PATH, state['key'])
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            print("Loading model..."); llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            print("Loading model..."); llm = await loop.run_in_executor(ex, load_llama_model_blocking, SESSION_MODEL_PATH)
         except Exception as e:
             print(f"Failed to load: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); secure_unlink(MODEL_PATH)
-                except Exception: pass
+            if SESSION_MODEL_PATH.exists():
+                secure_unlink(SESSION_MODEL_PATH)
             input("Enter..."); return
         state['model_loaded']=True
         try:
@@ -1991,9 +2036,9 @@ async def chat_session(state:dict):
         finally:
             try: del llm
             except Exception: pass
-            print("Re-encrypting model and removing plaintext...")
-            try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); secure_unlink(MODEL_PATH); state['model_loaded']=False
-            except Exception as e: print(f"Cleanup failed: {e}")
+            print("Removing temporary plaintext model...")
+            secure_unlink(SESSION_MODEL_PATH)
+            state['model_loaded']=False
             input("Enter...")
 
 async def road_scanner_flow(state:dict, mode: str = "ask"):
@@ -2024,16 +2069,15 @@ async def road_scanner_flow(state:dict, mode: str = "ask"):
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    decrypt_file(ENCRYPTED_MODEL, SESSION_MODEL_PATH, state['key'])
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
-            llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
+            llm = await loop.run_in_executor(ex, load_llama_model_blocking, SESSION_MODEL_PATH)
         except Exception as e:
             print(f"Model load failed: {e}")
-            if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); secure_unlink(MODEL_PATH)
-                except Exception: pass
+            if SESSION_MODEL_PATH.exists():
+                secure_unlink(SESSION_MODEL_PATH)
             input("Enter..."); return
         def gen_direct(p):
             out = llm(p, max_tokens=128, temperature=0.2)
@@ -2118,20 +2162,12 @@ async def road_scanner_flow(state:dict, mode: str = "ask"):
             if ch == "2":
                 outp = {"input": data, "prompt": prompt, "result": label, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
                 fn = input("Filename to save JSON (default road_scan.json): ").strip() or "road_scan.json"
-                Path(fn).write_text(json.dumps(outp, indent=2)); print(f"Saved {fn}")
+                _atomic_write_private(Path(fn), json.dumps(outp, indent=2).encode("utf-8")); print(f"Saved {fn}")
             break
         try: del llm
         except Exception: pass
-        print("Re-encrypting model and removing plaintext...")
-        try:
-            if MODEL_PATH.exists():
-                encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-                if ENCRYPTED_MODEL.exists() and ENCRYPTED_MODEL.stat().st_size > 0:
-                    secure_unlink(MODEL_PATH)
-                else:
-                    print("Encrypted copy missing; leaving plaintext in place.")
-        except Exception as e:
-            print(f"Cleanup error: {e}")
+        print("Removing temporary plaintext model...")
+        secure_unlink(SESSION_MODEL_PATH)
         drain_stdin()
         input("Enter to return to the main menu...")
 
@@ -2246,7 +2282,7 @@ def spooky_lab_flow(state: dict):
                 print("Unavailable. Both KEMs must be enabled."); input("Enter..."); continue
             try:
                 _assert_private_regular(SPOOKY_LAB_PATH, "SC1 lab artifact")
-                salt, expected, envelope = _spooky_lab_unpack(SPOOKY_LAB_PATH.read_bytes())
+                salt, expected, envelope = _spooky_lab_unpack(storage.read_private(SPOOKY_LAB_PATH, 1024 * 1024))
                 protector = _spooky_lab_protector(salt)
                 recovered = bytearray(spooky_open_envelope(envelope, protector, _OQS))
                 ok = hmac.compare_digest(hashlib.sha256(recovered).digest(), expected)
@@ -2298,7 +2334,7 @@ def trihybrid_flow(state: dict):
         return
     pw = getpass.getpass("Current passphrase/token (empty for machine-only): ") or None
     # Authenticate the on-disk key before replacing its envelope; retain its gate.
-    current = KEY_PATH.read_bytes()
+    current = storage.read_private(KEY_PATH, 1024 * 1024)
     if current.startswith((b"NKEY2", b"NKEY3", b"NKEY4")) and current[6] & KEY_FLAG_PASSPHRASE and not pw:
         raise ValueError("Current passphrase/token is required to preserve the gate")
     key = load_data_key(pw)
@@ -2325,12 +2361,12 @@ def rotate_data_key(old_key: bytes, passphrase: Optional[str]) -> bytes:
                 yield None
                 continue
             _assert_private_regular(path, "encrypted data")
-            raw = path.read_bytes()
+            raw = storage.read_private(path)
             mac = Path(str(path) + MAC_SUFFIX)
             if mac.exists():
                 _assert_private_regular(mac, "file MAC")
                 expected = hmac.new(_mac_key(old_key), raw, hashlib.sha256).digest()
-                if not hmac.compare_digest(mac.read_bytes(), expected):
+                if not hmac.compare_digest(storage.read_private(mac, 64), expected):
                     raise ValueError("Existing file MAC check failed")
             plain = aes_decrypt(raw, old_key)
             encrypted = aes_encrypt(plain, new_key)
@@ -2356,7 +2392,7 @@ def rekey_flow(state:dict):
     if choice not in ("1", "2"):
         return
     current_pw = getpass.getpass("Current passphrase/token (empty for machine-only): ") or None
-    current = KEY_PATH.read_bytes()
+    current = storage.read_private(KEY_PATH, 1024 * 1024)
     if current.startswith((b"NKEY2", b"NKEY3", b"NKEY4")) and current[6] & KEY_FLAG_PASSPHRASE and not current_pw:
         raise ValueError("Current passphrase/token is required")
     if not hmac.compare_digest(load_data_key(current_pw), state['key']):
@@ -2366,6 +2402,7 @@ def rekey_flow(state:dict):
         pw = getpass.getpass("New passphrase: ")
         if not pw or pw != getpass.getpass("Confirm: "):
             raise ValueError("Passphrase is empty or does not match")
+        validate_new_passphrase(pw)
     try:
         state['key'] = rotate_data_key(state['key'], pw)
     except BaseException:
@@ -2377,7 +2414,7 @@ def rekey_flow(state:dict):
 
 
 def encryption_status_flow(state: dict):
-    raw = KEY_PATH.read_bytes() if KEY_PATH.exists() else b""
+    raw = storage.read_private(KEY_PATH, 1024 * 1024) if KEY_PATH.exists() else b""
     profile = "SpookyNaza tri-hybrid (NKEY4)" if raw.startswith(b"NKEY4") else "Legacy / classical"
     print(boxed("Encryption status", ["Active: " + profile, "New keys: SpookyNaza tri-hybrid",
         oqs_status_line(), "Suite: " + tri.SUITE.decode(),
@@ -2421,17 +2458,21 @@ def scanner_ready() -> bool:
     return bool(KEY_PATH.exists() and ENCRYPTED_MODEL.exists() and ENCRYPTED_MODEL.stat().st_size > 0)
 
 def main():
+    cleanup_private_temps()
     if storage.recover(Path.cwd(), rotation_targets()):
         print("Recovered interrupted rotation; restored the previous encrypted files and key.")
     for bad in ("LD_PRELOAD", "LD_LIBRARY_PATH"):
         if os.environ.get(bad) and "liboqs" not in os.environ.get(bad, ""):
             print("Note: {} is set. A loader hook can see keys in RAM.".format(bad))
-    try: key = ensure_key_interactive()
-    except Exception: key = get_or_create_key()
+    try:
+        key = ensure_key_interactive()
+    except Exception as exc:
+        raise SystemExit("Key initialization or unlock failed; refusing to create an ungated replacement.") from exc
     state = {"key": key, "model_loaded": False}
     try:
         asyncio.run(init_db(state['key']))
-    except Exception: pass
+    except Exception as exc:
+        raise SystemExit("Encrypted history authentication failed; refusing to continue.") from exc
     try:
         if scanner_ready():
             print("Model and key found. Opening Road Scanner...")
