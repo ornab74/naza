@@ -365,17 +365,13 @@ def _assert_private_regular(path: Path, label: str):
     except FileNotFoundError:
         return
     mode = st.st_mode
-    if stat_isdir(mode):
-        raise RuntimeError("{} is a directory".format(label))
+    if not statmod.S_ISREG(mode):
+        raise RuntimeError("{} is not a regular file".format(label))
     if mode & 0o077:
         os.chmod(str(path), 0o600)
         st = os.lstat(str(path))
         if st.st_mode & 0o077:
             raise RuntimeError("{} is readable by group/other".format(label))
-
-
-def stat_isdir(mode: int) -> bool:
-    return statmod.S_ISDIR(mode)
 
 
 def _read_first(path: str, n: int = 256) -> str:

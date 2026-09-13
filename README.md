@@ -720,7 +720,7 @@ CRYPTO-AGILITY ......... 76 / 100
 
 **HIGH: none identified from this simulation/static pass.**
 
-**MEDIUM — PQ lock lacks an independent trust anchor.** The workflow creates the signing key and public key together during each generation. An attacker who can replace the complete generated artifact set could generate their own valid signature/public-key pair. This affects provenance/supply-chain integrity, not the runtime encryption directly. Recommended fix: keep a long-lived verification public key pinned independently of the generated lock artifacts, ideally with the signing private key outside the repository/runner. Regression test: replace manifest+signature while keeping the independently pinned public key fixed and require verification failure.
+**MITIGATED — independent lock provenance.** The experimental PQ signature still creates an ephemeral keypair for its self-check, but it is no longer the provenance anchor. The workflow now requests GitHub OIDC and attestation permissions and uses `actions/attest` to bind all four generated lock artifacts to the repository and workflow identity through signed build provenance. Consumers should verify that attestation against the expected repository before trusting downloaded artifacts.
 
 **MEDIUM — machine-binding availability.** A hardware-derived protector is useful for local binding, but machine-only configurations remain sensitive to changes in fingerprint inputs. The principal simulated consequence is loss of access rather than automatic confidentiality compromise.
 
@@ -775,4 +775,3 @@ SAFE-ENOUGH-FOR-EXPERIMENTAL-USE
 
 * experimental/unvalidated construction
 ```
-

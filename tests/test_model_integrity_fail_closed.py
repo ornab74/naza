@@ -1,6 +1,8 @@
 import ast
 import hashlib
 import hmac
+import os
+import stat as statmod
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +38,19 @@ class ModelIntegrityFailClosedTests(unittest.TestCase):
             p.write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
                 ns["verify_model_integrity"](p, "0" * 64)
+
+    def test_sensitive_artifact_rejects_fifo(self):
+        source = MAIN.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        wanted = {"_is_symlink", "_assert_private_regular"}
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+        ns = {"Path": Path, "os": os, "statmod": statmod}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "main.py", "exec"), ns)
+        with tempfile.TemporaryDirectory() as td:
+            fifo = Path(td) / "key.fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(RuntimeError, "not a regular file"):
+                ns["_assert_private_regular"](fifo, "key file")
 
 
 if __name__ == "__main__":

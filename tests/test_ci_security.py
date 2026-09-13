@@ -19,5 +19,17 @@ class CiSupplyChainTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("- .github/workflows/lock-requirements.yml", workflow)
 
+    def test_lock_artifacts_receive_independent_provenance(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("id-token: write", workflow)
+        self.assertIn("attestations: write", workflow)
+        attest_at = workflow.index("uses: actions/attest@v3")
+        sign_at = workflow.index("python /tmp/pq_sign_lock.py")
+        upload_at = workflow.index("uses: actions/upload-artifact@v4")
+        self.assertLess(sign_at, attest_at)
+        self.assertLess(attest_at, upload_at)
+        for artifact in ("requirements.txt", "lock.manifest.json", "lock.manifest.pqsig", "pq_pubkey.b64"):
+            self.assertIn(artifact, workflow[attest_at:upload_at])
+
 if __name__ == "__main__":
     unittest.main()
