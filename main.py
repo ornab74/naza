@@ -858,24 +858,24 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔐 Encrypting {src} -> {dest}")
+    _assert_private_regular(src, "plaintext input")
     data = src.read_bytes()
     start = time.time()
     enc = aes_encrypt(data, key)
-    dest.write_bytes(enc)
-    _chmod_private(dest)
+    _atomic_write_private(dest, enc)
     write_file_mac(dest, key)
     dur = time.time()-start
     print(f"Encrypted ({len(enc)} bytes) in {dur:.2f}s")
 
 def decrypt_file(src: Path, dest: Path, key: bytes):
     print(f"Decrypting {src} -> {dest}")
+    _assert_private_regular(src, "encrypted input")
     macp = Path(str(src) + MAC_SUFFIX)
     if macp.exists() and not verify_file_mac(src, key):
         raise ValueError("encrypted file MAC check failed")
     enc = src.read_bytes()
     data = aes_decrypt(enc, key)
-    dest.write_bytes(data)
-    _chmod_private(dest)
+    _atomic_write_private(dest, data)
     if not macp.exists():
         write_file_mac(src, key)
     print(f"Decrypted ({len(data)} bytes)")

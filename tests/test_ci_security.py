@@ -23,13 +23,20 @@ class CiSupplyChainTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow)
         self.assertIn("attestations: write", workflow)
-        attest_at = workflow.index("uses: actions/attest@v3")
+        attest_at = workflow.index("uses: actions/attest@e59cbc1ad1ac2d59339667419eb8cdde6eb61e3d")
         sign_at = workflow.index("python /tmp/pq_sign_lock.py")
-        upload_at = workflow.index("uses: actions/upload-artifact@v4")
+        upload_at = workflow.index("uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
         self.assertLess(sign_at, attest_at)
         self.assertLess(attest_at, upload_at)
         for artifact in ("requirements.txt", "lock.manifest.json", "lock.manifest.pqsig", "pq_pubkey.b64"):
             self.assertIn(artifact, workflow[attest_at:upload_at])
+
+    def test_ci_bootstrap_and_actions_are_immutable(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("python:3.12-slim@sha256:", workflow)
+        self.assertIn("pip install --require-hashes -r bootstrap-requirements.txt", workflow)
+        self.assertNotIn("pip install --upgrade pip", workflow)
+        self.assertNotRegex(workflow, r"uses:\s+[^\s]+@v\d+(?:\s|$)")
 
 if __name__ == "__main__":
     unittest.main()

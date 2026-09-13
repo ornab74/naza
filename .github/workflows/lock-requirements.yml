@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - requirements.in
+      - bootstrap-requirements.in
+      - bootstrap-requirements.txt
       - .github/workflows/lock-requirements.yml
 
 env:
@@ -23,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: python:3.12-slim
+      image: python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
     defaults:
       run:
@@ -31,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install system tools
         run: |
@@ -42,11 +44,10 @@ jobs:
             cmake ninja-build build-essential pkg-config git
           rm -rf /var/lib/apt/lists/*
 
-      - name: Upgrade pip + install pip-tools
+      - name: Install hash-locked bootstrap tools
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install pip-tools
+          python -m pip install --require-hashes -r bootstrap-requirements.txt
 
       - name: Generate hash-locked requirements.txt
         run: |
@@ -203,7 +204,7 @@ jobs:
           ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
 
       - name: Attest lock artifact provenance
-        uses: actions/attest@v3
+        uses: actions/attest@e59cbc1ad1ac2d59339667419eb8cdde6eb61e3d # v3.2.0
         with:
           subject-path: |
             requirements.txt
@@ -212,7 +213,7 @@ jobs:
             pq_pubkey.b64
 
       - name: Upload lock + PQ materials
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pq-locked-requirements
           path: |

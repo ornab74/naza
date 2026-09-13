@@ -726,7 +726,7 @@ CRYPTO-AGILITY ......... 76 / 100
 
 **MEDIUM — experimental cryptographic construction.** The PQ combiner and tri-hybrid construction are bespoke research designs. Their implementation has sensible transcript binding, domain separation and authenticated encryption, but static review/simulation cannot substitute for cryptanalysis. The source itself makes the same production-security limitation explicit.
 
-**LOW — CI bootstrap dependencies are not fully immutable.** The workflow upgrades pip and installs `pip-tools` without pinning an exact artifact hash, while GitHub Actions are referenced by release tags such as `actions/checkout@v4`. This leaves some CI-generation infrastructure outside the lock's immutable boundary.
+**MITIGATED — immutable CI bootstrap.** The workflow container is pinned by manifest digest, third-party actions are pinned to full commit SHAs, and `pip`, `setuptools`, `pip-tools`, and their bootstrap dependencies are installed from a committed hash-locked requirements file.
 
 ---
 

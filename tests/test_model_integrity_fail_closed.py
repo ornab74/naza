@@ -52,6 +52,15 @@ class ModelIntegrityFailClosedTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "not a regular file"):
                 ns["_assert_private_regular"](fifo, "key file")
 
+    def test_crypto_outputs_use_atomic_no_follow_writes(self):
+        source = MAIN.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for name in ("encrypt_file", "decrypt_file"):
+            fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+            self.assertTrue(any(isinstance(c.func, ast.Name) and c.func.id == "_atomic_write_private" for c in calls))
+            self.assertFalse(any(isinstance(c.func, ast.Attribute) and c.func.attr == "write_bytes" for c in calls))
+
 
 if __name__ == "__main__":
     unittest.main()
