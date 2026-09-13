@@ -5,6 +5,7 @@ from pathlib import Path
 WORKFLOW = Path(__file__).parents[1] / ".github" / "workflows" / "lock-requirements.yml"
 PROOT_SETUP = Path(__file__).parents[1] / "termux-naza-autosetup" / "setup.sh"
 PROOT_BOOT = Path(__file__).parents[1] / "termux-naza-autosetup" / "naza_boot.sh"
+PROOT_HEALTH = Path(__file__).parents[1] / "termux-naza-autosetup" / "naza_healthcheck.sh"
 NATIVE_SETUP = Path(__file__).parents[1] / "termux-naza-autosetup" / "setup_ubuntu.sh"
 RUNNER = Path(__file__).parents[1] / "run_naza.sh"
 UNLOCKERS = (
@@ -56,9 +57,38 @@ class CiSupplyChainTests(unittest.TestCase):
         self.assertIn('pip install --require-hashes -r "$APP_DIR/bootstrap-requirements.txt"', setup)
         self.assertNotIn('pip install -r "$APP_DIR/requirements.in"', setup)
         self.assertNotIn("--shared-tmp", boot)
+        self.assertGreaterEqual(boot.count("--isolated"), 3)
+        self.assertIn("ulimit -c 0", boot)
+        self.assertIn("ulimit -n 256", boot)
         self.assertNotIn('--bind "$HOME_T/.naza:', boot)
-        self.assertIn('mktemp "$HOME/.naza/.unlock.token.XXXXXX"', boot)
+        self.assertNotIn('mktemp "$HOME/.naza/.unlock.token.XXXXXX"', boot)
+        self.assertIn('NAZA_TOKEN_OUTPUT=stdout bash "$UNLOCK_SH"', boot)
+        self.assertIn("exec 9< <(NAZA_TOKEN_OUTPUT", boot)
+        self.assertIn('export NAZA_UNLOCK_FD=9', boot)
+        self.assertNotIn("HOST_TOKEN=", boot)
+        self.assertNotIn("TOKEN_VALUE=", boot)
         self.assertIn('[ ! -L "$UNLOCK_SH" ]', boot)
+
+    def test_keystore_policy_is_checked_at_setup_and_use(self):
+        setup = PROOT_SETUP.read_text(encoding="utf-8")
+        self.assertIn("termux-keystore list -d", setup)
+        self.assertIn('awk -v alias="$KEY_ALIAS"', setup)
+        self.assertIn('"required"[[:space:]]*:[[:space:]]*true', setup)
+        self.assertIn('"algorithm"[[:space:]]*:[[:space:]]*"RSA"', setup)
+        for path in UNLOCKERS:
+            script = path.read_text(encoding="utf-8")
+            self.assertIn("termux-keystore list -d", script)
+            self.assertIn('awk -v alias="$ALIAS"', script)
+            self.assertIn("does not require Android authentication", script)
+
+    def test_deployment_healthcheck_uses_isolated_guest(self):
+        setup = PROOT_SETUP.read_text(encoding="utf-8")
+        check = PROOT_HEALTH.read_text(encoding="utf-8")
+        self.assertIn("naza_healthcheck.sh", setup)
+        self.assertIn('bash "$HOME/.naza/naza_healthcheck.sh"', setup)
+        self.assertIn("--isolated --user sudouser", check)
+        self.assertIn("naza_crypto_preflight.py", check)
+        self.assertIn("8#$mode & 8#022", check)
 
     def test_native_installer_rejects_unsafe_targets_and_unlocked_fallbacks(self):
         setup = NATIVE_SETUP.read_text(encoding="utf-8")
@@ -75,9 +105,10 @@ class CiSupplyChainTests(unittest.TestCase):
             self.assertIn("umask 077", script)
             self.assertIn('mktemp "$NAZA_DIR/.challenge.XXXXXX"', script)
             self.assertIn('mktemp "$NAZA_DIR/.unlock.token.XXXXXX"', script)
-        self.assertIn('grep -Eq \'^[0-9a-f]{64}$\'', script)
-        self.assertIn('[ ! -L "$NAZA_DIR" ]', script)
-        self.assertIn('rm -f -- "$CHALLENGE"', script)
+            self.assertIn('grep -Eq \'^[0-9a-f]{64}$\'', script)
+            self.assertIn('[ ! -L "$NAZA_DIR" ]', script)
+            self.assertIn('[ -e "$CHALLENGE" ] || [ -L "$CHALLENGE" ]', script)
+            self.assertNotIn('rm -f -- "$CHALLENGE"', script)
 
     def test_runtime_environment_is_sanitized(self):
         runner = RUNNER.read_text(encoding="utf-8")
@@ -88,6 +119,7 @@ class CiSupplyChainTests(unittest.TestCase):
         self.assertIn("safe_runtime_file", runner)
         self.assertIn("8#022", runner)
         self.assertIn('naza_crypto_preflight.py', runner)
+        self.assertIn('export NAZA_REQUIRE_PROCESS_HARDENING=1', runner)
 
 if __name__ == "__main__":
     unittest.main()

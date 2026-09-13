@@ -74,6 +74,11 @@ class ModelIntegrityFailClosedTests(unittest.TestCase):
     def test_unlock_token_cleanup_never_follows_symlinks(self):
         source = MAIN.read_text(encoding="utf-8")
         self.assertIn("UNLOCK_MAX_AGE = 30.0", source)
+        self.assertIn('os.environ.pop("NAZA_UNLOCK_FD", "")', source)
+        self.assertIn("PR_SET_DUMPABLE", source)
+        self.assertIn("Could not enforce non-dumpable process policy", source)
+        self.assertIn("PR_SET_NO_NEW_PRIVS", source)
+        self.assertIn("Required streamed biometric authorization is missing or malformed", source)
         tree = ast.parse(source)
         consume = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "consume_unlock_token")
         calls = [n for n in ast.walk(consume) if isinstance(n, ast.Call)]

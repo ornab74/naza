@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 import hmac
 import secrets
 import stat as statmod
+import ctypes
 from llama_cpp import Llama
 import spooky_trihybrid as tri
 import naza_storage as storage
@@ -30,6 +31,31 @@ try:
     os.umask(0o077)
 except Exception:
     pass
+
+# Reduce same-UID inspection of live key/token material where Linux permits it.
+_PROCESS_NONDUMPABLE = False
+PR_GET_DUMPABLE = 3
+PR_SET_DUMPABLE = 4
+PR_SET_NO_NEW_PRIVS = 38
+PR_GET_NO_NEW_PRIVS = 39
+_PROCESS_NO_NEW_PRIVS = False
+try:
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _PROCESS_NONDUMPABLE = (
+        _libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+        and _libc.prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0
+    )
+    _PROCESS_NO_NEW_PRIVS = (
+        _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+        and _libc.prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1
+    )
+except Exception:
+    pass
+if os.environ.get("NAZA_REQUIRE_PROCESS_HARDENING") == "1":
+    if not _PROCESS_NONDUMPABLE:
+        raise RuntimeError("Could not enforce non-dumpable process policy")
+    if not _PROCESS_NO_NEW_PRIVS:
+        raise RuntimeError("Could not enforce no-new-privileges process policy")
 
 # No psutil / pennylane. Metrics come from /proc and /sys (Ubuntu-proof).
 # Entropic score uses an in-house 2-qubit statevector (stdlib only).
@@ -718,10 +744,49 @@ UNLOCK_CANDIDATES = [
     Path("/root/.naza/unlock.token"),
 ]
 UNLOCK_MAX_AGE = 30.0
+_UNLOCK_FD_READ = False
+_UNLOCK_FD_TOKEN: Optional[str] = None
+_UNLOCK_FD_REQUIRED = "NAZA_UNLOCK_FD" in os.environ
+
+
+def _read_unlock_fd() -> Optional[str]:
+    """Consume the inherited unlock descriptor once; never use it as stdin."""
+    global _UNLOCK_FD_READ, _UNLOCK_FD_TOKEN
+    if _UNLOCK_FD_READ:
+        return _UNLOCK_FD_TOKEN
+    _UNLOCK_FD_READ = True
+    raw_fd = os.environ.pop("NAZA_UNLOCK_FD", "")
+    if not raw_fd:
+        return None
+    try:
+        fd = int(raw_fd, 10)
+        if fd < 3 or fd > 9:
+            return None
+        chunks = []
+        remaining = 129
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks).decode("ascii").strip()
+        if re.fullmatch(r"[0-9a-f]{64}", raw):
+            _UNLOCK_FD_TOKEN = raw
+    except Exception:
+        _UNLOCK_FD_TOKEN = None
+    finally:
+        try:
+            os.close(int(raw_fd, 10))
+        except Exception:
+            pass
+    return _UNLOCK_FD_TOKEN
 
 
 def read_unlock_token() -> Optional[str]:
     """Token written by Termux naza_unlock.sh after fingerprint + keystore sign."""
+    if "NAZA_UNLOCK_FD" in os.environ or _UNLOCK_FD_READ:
+        return _read_unlock_fd()
     now = time.time()
     for p in UNLOCK_CANDIDATES:
         if p is None:
@@ -744,6 +809,8 @@ def read_unlock_token() -> Optional[str]:
 
 
 def consume_unlock_token():
+    global _UNLOCK_FD_TOKEN
+    _UNLOCK_FD_TOKEN = None
     for p in UNLOCK_CANDIDATES:
         if p is None:
             continue
@@ -779,6 +846,8 @@ def validate_new_passphrase(passphrase: str) -> None:
 
 def ensure_key_interactive() -> bytes:
     token = read_unlock_token()
+    if _UNLOCK_FD_REQUIRED and not token:
+        raise RuntimeError("Required streamed biometric authorization is missing or malformed")
     if KEY_PATH.exists():
         try:
             return load_data_key(token)
@@ -1775,12 +1844,25 @@ def seal_scan(label: str, prompt: str, sync: Optional[dict], key: bytes) -> str:
     lock = ""
     wob = ""
     if sync:
-        lock = ",".join(sync.get("lock") or [])
+        raw_lock = sync.get("lock")
+        if isinstance(raw_lock, (list, tuple)):
+            lock = ",".join(str(item) for item in raw_lock)
+        elif raw_lock is not None:
+            lock = "{:.3f}".format(float(raw_lock))
         w = sync.get("wobble") or {}
         wob = "{}:{}".format(w.get("word", ""), w.get("leader", ""))
     body = "|".join([label, lock, wob, hashlib.sha256((prompt or "").encode()).hexdigest()[:16]])
     tag = hmac.new(_mac_key(key), body.encode(), hashlib.sha256).hexdigest()[:24]
     return "receipt {} {}".format(body, tag)
+
+
+def persist_scan_receipt(label: str, prompt: str, sync: Optional[dict], key: bytes) -> str:
+    """Atomically persist a receipt without participating in classification."""
+    global _LAST_RECEIPT
+    receipt = seal_scan(label, prompt, sync, key)
+    _atomic_write_private(Path("naza.last.receipt"), (receipt + "\n").encode())
+    _LAST_RECEIPT = receipt
+    return receipt
 
 
 def entropic_summary_text(score: float) -> str:
@@ -1819,6 +1901,8 @@ def punkd_apply(prompt_text: str, token_weights: Dict[str,float], profile: str =
     return patched, multiplier
 
 def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk_tokens: int = 64, base_temperature: float = 0.2, punkd_profile: str = "balanced", streaming_callback: Optional[Callable[[str], None]] = None) -> str:
+    if max_total_tokens < 1 or chunk_tokens < 1:
+        raise ValueError("token budgets must be positive")
     assembled = ""
     cur_prompt = prompt
     token_weights = punkd_analyze(prompt, top_n=16)
@@ -1827,7 +1911,8 @@ def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk
     for i in range(iterations):
         patched_prompt, mult = punkd_apply(cur_prompt, token_weights, profile=punkd_profile)
         temp = max(0.01, min(2.0, base_temperature * mult))
-        out = llm(patched_prompt, max_tokens=chunk_tokens, temperature=temp)
+        remaining = max_total_tokens - i * chunk_tokens
+        out = llm(patched_prompt, max_tokens=min(chunk_tokens, remaining), temperature=temp)
         text = ""
         if isinstance(out, dict):
             try: text = out.get("choices",[{"text":""}])[0].get("text","")
@@ -2125,12 +2210,8 @@ async def road_scanner_flow(state:dict, mode: str = "ask"):
 
         show_label(label)
         try:
-            rec = seal_scan(label, prompt, _LAST_SYNC, state["key"])
-            global _LAST_RECEIPT
-            _LAST_RECEIPT = rec
+            rec = persist_scan_receipt(label, prompt, _LAST_SYNC, state["key"])
             print(color(rec, fg=36))
-            rp = Path("naza.last.receipt")
-            _atomic_write_private(rp, (rec + "\n").encode())
         except Exception:
             rec = ""
         while True:
@@ -2152,6 +2233,11 @@ async def road_scanner_flow(state:dict, mode: str = "ask"):
                     result = await loop.run_in_executor(ex, run_chunked2)
                 label, text = relabel(result)
                 show_label(label)
+                try:
+                    rec = persist_scan_receipt(label, prompt, _LAST_SYNC, state["key"])
+                    print(color(rec, fg=36))
+                except Exception:
+                    rec = ""
                 continue
             if ch in ("2", "3"):
                 try:

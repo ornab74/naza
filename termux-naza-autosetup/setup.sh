@@ -24,6 +24,8 @@ command -v termux-keystore >/dev/null 2>&1 || \
   fail "termux-keystore is unavailable. Install the Termux:API Android companion app, then rerun this installer."
 command -v termux-fingerprint >/dev/null 2>&1 || \
   fail "termux-fingerprint is unavailable. Install the Termux:API Android companion app, then rerun this installer."
+proot-distro login --help 2>&1 | grep -q -- '--isolated' || \
+  fail "installed proot-distro does not support required --isolated mode"
 
 printf '\n==> Enforcing required Android/Termux keystore key: %s\n' "$KEY_ALIAS"
 KEY_LIST="$(termux-keystore list 2>/dev/null || true)"
@@ -34,11 +36,25 @@ fi
 KEY_LIST="$(termux-keystore list 2>/dev/null || true)"
 printf '%s\n' "$KEY_LIST" | grep -Fq "$KEY_ALIAS" || \
   fail "required Termux keystore alias '$KEY_ALIAS' was not found after generation"
+KEY_DETAIL="$(termux-keystore list -d 2>/dev/null)" || fail "could not inspect keystore properties"
+KEY_RECORD="$(printf '%s\n' "$KEY_DETAIL" | awk -v alias="$KEY_ALIAS" '
+  BEGIN { RS="\\\"alias\\\"[[:space:]]*:[[:space:]]*" }
+  index($0, "\"" alias "\"") == 1 { print; found=1; exit }
+  END { if (!found) exit 1 }
+')" || fail "could not isolate detailed metadata for keystore alias '$KEY_ALIAS'"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"algorithm"[[:space:]]*:[[:space:]]*"RSA"' || \
+  fail "keystore alias must use RSA"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"size"[[:space:]]*:[[:space:]]*2048' || \
+  fail "keystore alias must use a 2048-bit key"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"required"[[:space:]]*:[[:space:]]*true' || \
+  fail "keystore alias is not protected by Android user authentication"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"enforced_by_secure_hardware"[[:space:]]*:[[:space:]]*true' || \
+  fail "Android does not report hardware-enforced authentication for this key"
 echo "Required keystore alias verified: $KEY_ALIAS"
 
 mkdir -p "$HOME/.naza"
 chmod 700 "$HOME/.naza"
-for helper in naza_unlock.sh naza_boot.sh; do
+for helper in naza_unlock.sh naza_boot.sh naza_healthcheck.sh; do
   [ -f "$HERE/$helper" ] || fail "missing installer helper: $HERE/$helper"
   cp "$HERE/$helper" "$HOME/.naza/$helper"
   chmod 700 "$HOME/.naza/$helper"
@@ -50,12 +66,13 @@ if proot-distro login ubuntu -- true >/dev/null 2>&1; then
 else
   proot-distro install ubuntu
 fi
+alias naza-health='bash "$HOME/.naza/naza_healthcheck.sh"'
 
 export PROOT_TMP_DIR="$HOME/tmp"
 mkdir -p "$PROOT_TMP_DIR"
 
 printf '\n==> Installing SpookyNaza + pinned liboqs inside Ubuntu\n'
-proot-distro login ubuntu -- env NAZA_REF="$NAZA_REF" NAZA_REPO_URL="$REPO_URL" bash <<'PROOT_EOF'
+proot-distro login ubuntu --isolated -- env NAZA_REF="$NAZA_REF" NAZA_REPO_URL="$REPO_URL" bash <<'PROOT_EOF'
 set -euo pipefail
 umask 077
 export DEBIAN_FRONTEND=noninteractive
@@ -138,9 +155,13 @@ if [ -z "${NAZA_STARTED:-}" ] && [ "$PWD" = "$HOME" ] && [ -z "${SSH_CLIENT:-}" 
 fi
 alias naza='bash "$HOME/.naza/naza_boot.sh"'
 alias naza-unlock='bash "$HOME/.naza/naza_unlock.sh"'
+alias naza-health='bash "$HOME/.naza/naza_healthcheck.sh"'
 # === END NAZA AUTO-START ===
 BASHRC
 fi
+
+printf '\n==> Running isolated deployment health check\n'
+bash "$HOME/.naza/naza_healthcheck.sh"
 
 echo
 echo "=============================================================="
@@ -149,4 +170,5 @@ echo "Required Termux keystore alias: $KEY_ALIAS"
 echo "Default crypto mode: SpookyNaza tri-hybrid (NKEY4)"
 echo "Pinned liboqs: 0.14.0, verified before build"
 echo "Reopen Termux or run: naza"
+echo "Deployment check: naza-health"
 echo "=============================================================="
