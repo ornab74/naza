@@ -16,6 +16,7 @@ permissions:
   contents: read
   id-token: write
   attestations: write
+  artifact-metadata: write
 
 jobs:
   lock_and_pq_sign:
@@ -201,7 +202,7 @@ jobs:
           ls -la requirements.txt lock.manifest.json lock.manifest.pqsig pq_pubkey.b64
 
       - name: Attest lock artifact provenance
-        uses: actions/attest@e59cbc1ad1ac2d59339667419eb8cdde6eb61e3d # v3.2.0
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
           subject-path: |
             requirements.txt
