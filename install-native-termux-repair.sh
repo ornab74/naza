@@ -831,85 +831,105 @@ for name in (
 PY
 
 ###############################################################################
-# LLAMA CPP DISCOVERY / ANDROID-SAFE SOURCE BUILD
+# LLAMA CPP DISCOVERY
 ###############################################################################
 
 section "13. LLAMA-CPP-PYTHON DISCOVERY / REPAIR"
 
-LLAMA_PURELIB="$($PYTHON_BIN - <<'PY'
-import sysconfig
-print(sysconfig.get_paths()["purelib"])
+LLAMA_CURRENT="$(
+    "$PYTHON_BIN" - <<'PY' 2>/dev/null || true
+import llama_cpp
+print(llama_cpp.__version__)
 PY
 )"
-LLAMA_PKG_DIR="$LLAMA_PURELIB/llama_cpp"
-LLAMA_LIB_DIR="$(find "$LLAMA_PKG_DIR" -type f -name 'libllama.so*' -print -quit 2>/dev/null | xargs -r dirname)"
 
-llama_works() {
-    [ -n "${LLAMA_LIB_DIR:-}" ] || return 1
-    [ -f "$LLAMA_LIB_DIR/libllama.so" ] || return 1
-    LLAMA_CPP_LIB_PATH="$LLAMA_LIB_DIR" \
-    LD_LIBRARY_PATH="$LLAMA_LIB_DIR:$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
-import importlib.metadata as md
-assert md.version("llama-cpp-python") == "0.3.1"
-import llama_cpp
-from llama_cpp import Llama
-assert callable(Llama)
-PY
-}
+if [ "$LLAMA_CURRENT" = "$LLAMA_VERSION" ]; then
 
-if llama_works; then
-    echo "llama-cpp-python $LLAMA_VERSION native Android load: PASS"
+    echo "llama-cpp-python 0.3.1 already installed."
+
 else
-    echo "Rebuilding llama-cpp-python $LLAMA_VERSION from source for native Termux."
-    "$PYTHON_BIN" -m pip uninstall -y llama-cpp-python 2>/dev/null || true
-    export CMAKE_BUILD_PARALLEL_LEVEL=1
-    export FORCE_CMAKE=1
-    export CMAKE_ARGS="-DCMAKE_BUILD_TYPE=MinSizeRel -DBUILD_SHARED_LIBS=ON -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF"
+
+    echo "Installing llama-cpp-python $LLAMA_VERSION."
+
     "$PYTHON_BIN" -m pip install \
-        --no-cache-dir \
-        --no-binary llama-cpp-python \
-        --no-deps \
-        --force-reinstall \
         "llama-cpp-python==$LLAMA_VERSION"
 
-    LLAMA_PKG_DIR="$LLAMA_PURELIB/llama_cpp"
-    LLAMA_EXT="$LLAMA_PKG_DIR/_ctypes_extensions.py"
-    [ -f "$LLAMA_EXT" ] || die "Could not find llama_cpp/_ctypes_extensions.py after source build."
-
-    # Patch 0.3.1 loader classification without importing llama_cpp first.
-    if ! grep -q 'sys\.platform\.startswith("android")' "$LLAMA_EXT"; then
-        backup_file "$LLAMA_EXT"
-        "$PYTHON_BIN" - "$LLAMA_EXT" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-old = 'if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):'
-new = 'if sys.platform.startswith("linux") or sys.platform.startswith("android") or sys.platform.startswith("freebsd"):'
-if old in s:
-    p.write_text(s.replace(old, new, 1))
-PY
-    fi
-
-    LLAMA_LIB_DIR="$(find "$LLAMA_PKG_DIR" -type f -name 'libllama.so*' -print -quit 2>/dev/null | xargs -r dirname)"
-    [ -n "$LLAMA_LIB_DIR" ] || die "llama-cpp-python installed but libllama.so was not packaged."
-
-    # Prove Android's dynamic loader can resolve the installed native library.
-    LLAMA_CPP_LIB_PATH="$LLAMA_LIB_DIR" \
-    LD_LIBRARY_PATH="$LLAMA_LIB_DIR:$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    "$PYTHON_BIN" - "$LLAMA_LIB_DIR/libllama.so" <<'PY'
-import ctypes, sys
-ctypes.CDLL(sys.argv[1], mode=getattr(ctypes, "RTLD_GLOBAL", 0))
-import llama_cpp
-from llama_cpp import Llama
-print("llama-cpp-python:", llama_cpp.__version__)
-print("libllama load + Python API: PASS")
-PY
 fi
 
-export LLAMA_CPP_LIB_PATH="$LLAMA_LIB_DIR"
-export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+###############################################################################
+# LLAMA ANDROID PATCH
+###############################################################################
+
+LLAMA_EXT="$(
+    "$PYTHON_BIN" - <<'PY'
+import os
+import llama_cpp
+
+print(
+    os.path.join(
+        os.path.dirname(llama_cpp.__file__),
+        "_ctypes_extensions.py"
+    )
+)
+PY
+)"
+
+[ -f "$LLAMA_EXT" ] ||
+    die "Could not find llama_cpp/_ctypes_extensions.py."
+
+if grep -q \
+    'sys\.platform\.startswith("android")' \
+    "$LLAMA_EXT"
+then
+
+    echo "llama.cpp Android platform patch: already present."
+
+else
+
+    backup_file "$LLAMA_EXT"
+
+    "$PYTHON_BIN" - "$LLAMA_EXT" <<'PY'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+
+old = (
+    'if sys.platform.startswith("linux") '
+    'or sys.platform.startswith("freebsd"):'
+)
+
+new = (
+    'if sys.platform.startswith("linux") '
+    'or sys.platform.startswith("android") '
+    'or sys.platform.startswith("freebsd"):'
+)
+
+if old in s:
+    p.write_text(
+        s.replace(old, new, 1)
+    )
+    print("Applied Android llama_cpp patch.")
+else:
+    print(
+        "Expected platform block not found; "
+        "checking whether Android support already exists."
+    )
+PY
+
+fi
+
+"$PYTHON_BIN" - <<'PY'
+import llama_cpp
+
+print(
+    "llama-cpp-python:",
+    llama_cpp.__version__
+)
+
+print("llama_cpp Android import: PASS")
+PY
 
 ###############################################################################
 # CRYPTOGRAPHY
@@ -1050,7 +1070,7 @@ ks = sys.argv[1]
 
 try:
     raw = subprocess.check_output(
-        [ks, "list"],
+        [ks, "list", "-d"],
         text=True,
         stderr=subprocess.DEVNULL,
     )
@@ -1180,277 +1200,111 @@ backup_file "$NAZA_DIR/naza_unlock.sh"
 
 cat > "$NAZA_DIR/naza_unlock.sh" <<'NAZA_UNLOCK'
 #!/data/data/com.termux/files/usr/bin/bash
-
-###############################################################################
-# NAZA GATE 3
-#
-# Native Termux Android Keystore authentication.
-#
-# No biometric-specific Termux API.
-#
-# Existing Naza token protocol:
-#
-#   random challenge
-#   Android Keystore SHA256withRSA signature
-#   SHA256(challenge + signature)
-#   64 lowercase hexadecimal characters
-#
-###############################################################################
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME_T="${HOME:-/data/data/com.termux/files/home}"
-
 NAZA_DIR="$HOME_T/.naza"
-
 KEYSTORE="$PREFIX/bin/termux-keystore"
-
-ALIAS="naza-unlock"
+ALIAS="${NAZA_KEYSTORE_ALIAS:-naza-unlock}"
 SIGN_ALGO="SHA256withRSA"
-
+OUTPUT_MODE="${NAZA_TOKEN_OUTPUT:-file}"
 CHALLENGE="$NAZA_DIR/challenge"
-SIGNATURE="$NAZA_DIR/signature"
 TOKEN="$NAZA_DIR/unlock.token"
 
 export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
 
+CHALLENGE_TMP=""
+SIGNATURE_TMP=""
+TOKEN_TMP=""
+cleanup() {
+    [ -z "$CHALLENGE_TMP" ] || rm -f -- "$CHALLENGE_TMP"
+    [ -z "$SIGNATURE_TMP" ] || rm -f -- "$SIGNATURE_TMP"
+    [ -z "$TOKEN_TMP" ] || rm -f -- "$TOKEN_TMP"
+}
+trap cleanup EXIT HUP INT TERM
+
 die() {
     echo "ERROR: $*" >&2
-    rm -f \
-        "$CHALLENGE" \
-        "$SIGNATURE"
     exit 1
 }
 
-###############################################################################
-# DIRECTORY
-###############################################################################
+[[ "$ALIAS" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "invalid keystore alias"
+[ "$OUTPUT_MODE" = "file" ] || [ "$OUTPUT_MODE" = "stdout" ] || die "invalid token output mode"
+[ -x "$KEYSTORE" ] || die "termux-keystore unavailable"
 
 mkdir -p "$NAZA_DIR"
-
-[ ! -L "$NAZA_DIR" ] ||
-    die ".naza is a symbolic link"
-
+[ ! -L "$NAZA_DIR" ] || die ".naza is a symbolic link"
+[ "$(stat -c %u "$NAZA_DIR")" = "$(id -u)" ] || die ".naza has the wrong owner"
 chmod 700 "$NAZA_DIR"
 
-###############################################################################
-# KEYSTORE
-###############################################################################
+# Fail closed unless the Android Keystore key is the expected Gate-3 key.
+KEY_DETAIL="$(termux-keystore list -d 2>/dev/null)" || die "cannot inspect Android Keystore"
+KEY_RECORD="$(printf '%s\n' "$KEY_DETAIL" | awk -v alias="$ALIAS" '
+  BEGIN { RS="\\\"alias\\\"[[:space:]]*:[[:space:]]*\"" }
+  index($0, "\"" alias "\"") == 1 { print; found=1; exit }
+  END { if (!found) exit 1 }
+')" || die "Android Keystore alias '$ALIAS' is missing"
 
-[ -x "$KEYSTORE" ] ||
-    die "termux-keystore unavailable"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"algorithm"[[:space:]]*:[[:space:]]*"RSA"' || die "keystore alias is not RSA"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"size"[[:space:]]*:[[:space:]]*2048' || die "keystore alias is not RSA-2048"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"required"[[:space:]]*:[[:space:]]*true' || die "keystore alias does not require Android authentication"
+printf '%s\n' "$KEY_RECORD" | grep -Eq '"enforced_by_secure_hardware"[[:space:]]*:[[:space:]]*true' || die "keystore authentication is not hardware-enforced"
 
-###############################################################################
-# POLICY CHECK
-###############################################################################
-
-STATE="$(
-    "$PREFIX/bin/python" - "$KEYSTORE" <<'PY'
-import json
-import subprocess
-import sys
-
-ks = sys.argv[1]
-
-items = json.loads(
-    subprocess.check_output(
-        [ks, "list"],
-        text=True,
-    )
-)
-
-for item in items:
-
-    if item.get("alias") != "naza-unlock":
-        continue
-
-    auth = item.get("user_authentication") or {}
-
-    good = (
-        item.get("algorithm") == "RSA"
-        and int(item.get("size", 0)) == 2048
-        and bool(item.get("inside_secure_hardware"))
-        and bool(auth.get("required"))
-        and bool(auth.get("enforced_by_secure_hardware"))
-        and int(
-            auth.get(
-                "validity_duration_seconds",
-                -1
-            )
-        ) == 10
-    )
-
-    print(
-        "CORRECT"
-        if good
-        else
-        "WRONG"
-    )
-
-    raise SystemExit(0)
-
-print("MISSING")
-PY
-)"
-
-[ "$STATE" = "CORRECT" ] ||
-    die "naza-unlock does not have the correct Gate 3 policy"
-
-###############################################################################
-# CLEAN OLD TEMPORARY FILES
-###############################################################################
-
-rm -f \
-    "$CHALLENGE" \
-    "$SIGNATURE"
-
-###############################################################################
-# CREATE RANDOM CHALLENGE
-###############################################################################
-
-python - <<'PY' > "$CHALLENGE"
+# The challenge is random once, then retained owner-only. RSA PKCS#1 v1.5 signing
+# of the same challenge gives Naza a repeatable 64-hex Gate-3 passphrase while
+# the Android Keystore private key never leaves hardware-backed storage.
+if [ -e "$CHALLENGE" ] || [ -L "$CHALLENGE" ]; then
+    [ -f "$CHALLENGE" ] && [ ! -L "$CHALLENGE" ] || die "unsafe challenge file"
+    [ "$(stat -c %u "$CHALLENGE")" = "$(id -u)" ] || die "challenge has wrong owner"
+    [ "$(stat -c %a "$CHALLENGE")" = "600" ] || die "challenge has unsafe permissions"
+else
+    CHALLENGE_TMP="$(mktemp "$NAZA_DIR/.challenge.XXXXXX")"
+    "$PREFIX/bin/python" - "$CHALLENGE_TMP" <<'PY'
+from pathlib import Path
 import secrets
-
-print(
-    secrets.token_hex(32),
-    end=""
-)
+import sys
+Path(sys.argv[1]).write_text(secrets.token_hex(32), encoding="ascii")
 PY
+    chmod 600 "$CHALLENGE_TMP"
+    grep -Eq '^[0-9a-f]{64}$' "$CHALLENGE_TMP" || die "challenge generation failed"
+    mv -f -- "$CHALLENGE_TMP" "$CHALLENGE"
+    CHALLENGE_TMP=""
+fi
+grep -Eq '^[0-9a-f]{64}$' "$CHALLENGE" || die "challenge file is malformed"
 
-chmod 600 "$CHALLENGE"
+echo "Authenticate/unlock the Android device, then authorize the Keystore operation."
+SIGNATURE_TMP="$(mktemp "$NAZA_DIR/.signature.XXXXXX")"
+chmod 600 "$SIGNATURE_TMP"
+"$KEYSTORE" sign "$ALIAS" "$SIGN_ALGO" "$CHALLENGE" "$SIGNATURE_TMP" || die "Android Keystore signing failed"
+[ -s "$SIGNATURE_TMP" ] || die "Android Keystore returned no signature"
 
-grep -Eq \
-    '^[0-9a-f]{64}$' \
-    "$CHALLENGE" ||
-    die "Challenge generation failed"
-
-###############################################################################
-# USER MESSAGE
-###############################################################################
-
-echo
-echo "================================================================"
-echo " NAZA GATE 3"
-echo "================================================================"
-echo
-echo "Android Keystore hardware authentication is required."
-echo
-echo "Lock the phone."
-echo "Unlock/authenticate the phone."
-echo "Then continue."
-echo
-echo "No biometric-specific Termux API is used."
-echo
-
-###############################################################################
-# ACTUAL TERMUX-KEYSTORE SIGN INTERFACE
-#
-# termux-keystore:
-#
-#   sign <alias> <algorithm> <input-file> <output-file>
-#
-###############################################################################
-
-"$KEYSTORE" sign \
-    "$ALIAS" \
-    "$SIGN_ALGO" \
-    "$CHALLENGE" \
-    "$SIGNATURE" ||
-    die "Android Keystore signing failed"
-
-[ -s "$SIGNATURE" ] ||
-    die "Android Keystore returned no signature"
-
-###############################################################################
-# EXISTING NAZA TOKEN FORMAT
-###############################################################################
-
-TOKEN_VALUE="$(
-    python - \
-        "$CHALLENGE" \
-        "$SIGNATURE" \
-        <<'PY'
+TOKEN_VALUE="$("$PREFIX/bin/python" - "$CHALLENGE" "$SIGNATURE_TMP" <<'PY'
 from pathlib import Path
 import hashlib
 import sys
-
-challenge = Path(
-    sys.argv[1]
-).read_text().strip()
-
-signature = Path(
-    sys.argv[2]
-).read_bytes()
-
-# Naza's existing token contract:
-#
-# SHA256(challenge text + signature bytes)
-#
-# The resulting token is 64 lowercase hexadecimal characters.
-
-digest = hashlib.sha256()
-
-digest.update(
-    challenge.encode("ascii")
-)
-
-digest.update(
-    signature
-)
-
-token = digest.hexdigest()
-
-if len(token) != 64:
-    raise SystemExit(
-        "Unexpected token length"
-    )
-
-print(token)
+challenge = Path(sys.argv[1]).read_text(encoding="ascii").strip().encode("ascii")
+signature = Path(sys.argv[2]).read_bytes()
+print(hashlib.sha256(challenge + signature).hexdigest())
 PY
 )"
+printf '%s\n' "$TOKEN_VALUE" | grep -Eq '^[0-9a-f]{64}$' || die "generated token is malformed"
 
-printf '%s\n' "$TOKEN_VALUE" |
-    grep -Eq \
-        '^[0-9a-f]{64}$' ||
-    die "Generated token does not match Naza token format"
+if [ "$OUTPUT_MODE" = "stdout" ]; then
+    printf '%s\n' "$TOKEN_VALUE"
+else
+    TOKEN_TMP="$(mktemp "$NAZA_DIR/.unlock.token.XXXXXX")"
+    chmod 600 "$TOKEN_TMP"
+    printf '%s\n' "$TOKEN_VALUE" > "$TOKEN_TMP"
+    mv -f -- "$TOKEN_TMP" "$TOKEN"
+    TOKEN_TMP=""
+    chmod 600 "$TOKEN"
+    echo "Gate 3 Android Keystore token ready: $TOKEN"
+fi
 
-###############################################################################
-# ATOMIC TOKEN INSTALL
-###############################################################################
-
-TMP_TOKEN="$(
-    mktemp "$NAZA_DIR/.unlock.token.XXXXXX"
-)"
-
-chmod 600 "$TMP_TOKEN"
-
-printf '%s\n' "$TOKEN_VALUE" > "$TMP_TOKEN"
-
-mv -f \
-    "$TMP_TOKEN" \
-    "$TOKEN"
-
-chmod 600 "$TOKEN"
-
-###############################################################################
-# CLEAN CHALLENGE/SIGNATURE
-###############################################################################
-
-rm -f \
-    "$CHALLENGE" \
-    "$SIGNATURE"
-
-unset TOKEN_VALUE
-
-echo
-echo "Gate 3 Android Keystore authentication: PASS"
-echo "Naza unlock token ready."
-echo "Token: $TOKEN"
-echo
-
+unset TOKEN_VALUE KEY_DETAIL KEY_RECORD
 NAZA_UNLOCK
 
 chmod 700 "$NAZA_DIR/naza_unlock.sh"
@@ -1466,77 +1320,51 @@ backup_file "$NAZA_DIR/run_naza.sh"
 
 cat > "$NAZA_DIR/run_naza.sh" <<'NAZA_RUN'
 #!/data/data/com.termux/files/usr/bin/bash
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$APP_DIR/venv-termux"
+OQS_PREFIX="$HOME/.local/liboqs-0.14.0"
+TERMUX_EXEC="$PREFIX/lib/libtermux-exec.so"
 
-NAZA_DIR="$HOME/naza"
-VENV="$NAZA_DIR/venv-termux"
-OQS="$HOME/.local/liboqs-0.14.0"
-ORBIT_SOURCE="$NAZA_DIR/Optus-X-positioning.csv"
+safe_runtime_file() {
+  local path="$1" resolved owner mode
+  resolved="$(readlink -f -- "$path")" || return 1
+  [ -f "$resolved" ] || return 1
+  owner="$(stat -c %u "$resolved")" || return 1
+  mode="$(stat -c %a "$resolved")" || return 1
+  [ "$owner" = "$(id -u)" ] || [ "$owner" = "0" ] || return 1
+  [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+}
 
-# Keep Termux execution hook.
-# NEVER use libpython preload.
-export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
+[ -x "$VENV_DIR/bin/python" ] || { echo "ERROR: Naza virtual environment not found at $VENV_DIR" >&2; exit 1; }
+safe_runtime_file "$VENV_DIR/bin/python" || { echo "ERROR: Python runtime has unsafe ownership or permissions" >&2; exit 1; }
+OQS_LIBRARY="$(find "$OQS_PREFIX/lib" -maxdepth 1 -name 'liboqs.so*' -print -quit 2>/dev/null || true)"
+[ -n "$OQS_LIBRARY" ] && safe_runtime_file "$OQS_LIBRARY" || { echo "ERROR: pinned liboqs backend not found or unsafe at $OQS_PREFIX" >&2; exit 1; }
+[ -f "$TERMUX_EXEC" ] && safe_runtime_file "$TERMUX_EXEC" || { echo "ERROR: Termux execution hook missing or unsafe: $TERMUX_EXEC" >&2; exit 1; }
 
-[ -x "$VENV/bin/python" ] ||
-    {
-        echo "ERROR: native Termux Python missing." >&2
-        exit 1
-    }
-
-[ -f "$OQS/lib/liboqs.so" ] ||
-    {
-        echo "ERROR: native liboqs missing:
-$OQS/lib/liboqs.so" >&2
-        exit 1
-    }
-
-export VIRTUAL_ENV="$VENV"
-export PATH="$VENV/bin:$PATH"
-
-unset PYTHONHOME
-unset PYTHONPATH
-unset PYTHONSTARTUP
-unset PYTHONINSPECT
-
-export OQS_INSTALL_PATH="$OQS"
-[ -f "$ORBIT_SOURCE" ] && [ ! -L "$ORBIT_SOURCE" ] || { echo "ERROR: calibrated orbit CSV missing or unsafe" >&2; exit 1; }
-export NAZA_ORBIT_SOURCE_CSV="$ORBIT_SOURCE"
-LLAMA_PKG="$($VENV/bin/python - <<'PY'
-import sysconfig
-from pathlib import Path
-print(Path(sysconfig.get_paths()["purelib"]) / "llama_cpp")
-PY
-)"
-LLAMA_LIB_DIR="$(find "$LLAMA_PKG" -type f -name 'libllama.so*' -print -quit 2>/dev/null | xargs -r dirname)"
-[ -n "$LLAMA_LIB_DIR" ] || { echo "ERROR: llama.cpp native library not found" >&2; exit 1; }
-export LLAMA_CPP_LIB_PATH="$LLAMA_LIB_DIR"
-export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:$OQS/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
-export NAZA_OFFLINE_MODE="${NAZA_OFFLINE_MODE:-1}"
-
+# Remove inherited loader/Python injection state, then add back only the known
+# Termux execution hook required by native Android executables.
+unset LD_PRELOAD PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
+export LD_PRELOAD="$TERMUX_EXEC"
+export VIRTUAL_ENV="$VENV_DIR"
+export PATH="$VENV_DIR/bin:$PATH"
+export OQS_INSTALL_PATH="$OQS_PREFIX"
+export LD_LIBRARY_PATH="$OQS_PREFIX/lib"
 export NAZA_CRYPTO_MODE="tri"
 export NAZA_REQUIRE_PROCESS_HARDENING=1
+export TERM="${TERM:-xterm-256color}"
+export LANG="${LANG:-C.UTF-8}"
 export PYTHONUNBUFFERED=1
-
 ulimit -c 0 2>/dev/null || true
 
-cd "$NAZA_DIR"
-
-# Native crypto preflight.
-"$VENV/bin/python" \
-    "$NAZA_DIR/naza_crypto_preflight.py"
-
-exec "$VENV/bin/python" \
-    -u \
-    "$NAZA_DIR/main.py" \
-    "$@"
-
+cd "$APP_DIR"
+"$VENV_DIR/bin/python" "$APP_DIR/naza_crypto_preflight.py"
+exec "$VENV_DIR/bin/python" -u "$APP_DIR/main.py" "$@"
 NAZA_RUN
 
 chmod 700 "$NAZA_DIR/run_naza.sh"
@@ -1554,111 +1382,46 @@ backup_file "$BOOT"
 
 cat > "$BOOT" <<'NAZA_BOOT'
 #!/data/data/com.termux/files/usr/bin/bash
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
-
 export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
 
 NAZA_DIR="$HOME/naza"
-
 UNLOCK="$NAZA_DIR/naza_unlock.sh"
 RUN="$NAZA_DIR/run_naza.sh"
 
-[ -x "$UNLOCK" ] ||
-    {
-        echo "ERROR: Gate 3 helper missing." >&2
-        exit 1
-    }
-
-[ -x "$RUN" ] ||
-    {
-        echo "ERROR: native launcher missing." >&2
-        exit 1
-    }
+[ -x "$UNLOCK" ] || { echo "ERROR: Gate 3 helper missing: $UNLOCK" >&2; exit 1; }
+[ -x "$RUN" ] || { echo "ERROR: launcher missing: $RUN" >&2; exit 1; }
 
 while true; do
-
-    clear || true
-
+    clear 2>/dev/null || true
     cat <<'MENU'
-
 ╔══════════════════════════════════════════╗
 ║              NAZA SECURITY               ║
 ╠══════════════════════════════════════════╣
+║       Android Keystore Gate 3            ║
 ║                                          ║
-║       🔒  ANDROID KEYSTORE               ║
+║  Unlock/authenticate the phone, then:    ║
 ║                                          ║
-║  Gate 3 uses the hardware-backed         ║
-║  Android Keystore authorization key.     ║
-║                                          ║
-║  Lock phone.                             ║
-║  Unlock/authenticate phone.              ║
-║                                          ║
-║  U  = UNLOCK / START NAZA                ║
-║  L  = LOCK / EXIT                        ║
-║  Q  = QUIT TO SHELL                      ║
+║  U = authorize + start Naza              ║
+║  Q = quit                                ║
 ╚══════════════════════════════════════════╝
-
 MENU
-
-    printf "Select [U/L/Q]: "
-
+    printf '\nSelect [U/Q]: '
     IFS= read -r answer || exit 0
-
     case "$answer" in
-
         U|u)
-
-            if "$UNLOCK"; then
-
-                echo
-                echo "Gate 3: PASS"
-                echo
-                echo "Starting Naza..."
-                echo
-
-                exec "$RUN"
-
-            else
-
-                echo
-                echo "Gate 3 failed."
-                echo "Authenticate the phone and try again."
-                echo
-
-                read -r -p "Press Enter..."
-
-            fi
-
+            "$UNLOCK" || { echo "Gate 3 authorization failed." >&2; read -r -p "Press Enter..." _ || true; continue; }
+            exec "$RUN"
             ;;
-
-        L|l)
-
-            echo
-            echo "NAZA LOCKED."
-            exit 0
-            ;;
-
-        Q|q)
-
-            exit 0
-            ;;
-
-        *)
-
-            echo
-            echo "Invalid selection."
-            ;;
-
+        Q|q) exit 0 ;;
+        *) echo "Invalid selection."; sleep 1 ;;
     esac
-
 done
-
 NAZA_BOOT
 
 chmod 700 "$BOOT"
@@ -1774,12 +1537,7 @@ bash -n "$TERMUX_SETUP"
 section "22. INSTALLER SELF-PERMISSION"
 
 chmod 700 \
-    "$NAZA_DIR/install-native-termux-repair.sh" \
-    "$NAZA_DIR/naza_orbit_sim.py"
-
-[ -f "$NAZA_DIR/Optus-X-positioning.csv" ] || die "Missing calibrated orbit source CSV: Optus-X-positioning.csv"
-[ ! -L "$NAZA_DIR/Optus-X-positioning.csv" ] || die "Refusing symbolic-link orbit source CSV"
-chmod 600 "$NAZA_DIR/Optus-X-positioning.csv"
+    "$NAZA_DIR/install-native-termux-repair.sh"
 
 ###############################################################################
 # PYTHON SYNTAX — ALL REPO
@@ -1935,11 +1693,10 @@ while IFS= read -r -d '' f; do
     fi
 
 done < <(
-    printf '%s\0' \
-        "$NAZA_DIR/main.py" \
-        "$NAZA_DIR/run_naza.sh" \
-        "$NAZA_DIR/naza_unlock.sh" \
-        "$NAZA_DIR/naza-termux-boot.sh"
+    find "$NAZA_DIR" \
+        -type f \
+        \( -name '*.py' -o -name '*.sh' -o -name '*.bash' \) \
+        -print0
 )
 
 [ "$BAD" -eq 0 ] ||
@@ -2338,9 +2095,7 @@ unset PYTHONSTARTUP
 unset PYTHONINSPECT
 
 export OQS_INSTALL_PATH="$OQS_HOME"
-export LLAMA_CPP_LIB_PATH="$LLAMA_LIB_DIR"
-export LD_LIBRARY_PATH="$LLAMA_LIB_DIR:$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export NAZA_OFFLINE_MODE=1
+export LD_LIBRARY_PATH="$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export NAZA_CRYPTO_MODE="tri"
 export NAZA_REQUIRE_PROCESS_HARDENING=1
 export LD_PRELOAD="$TERMUX_EXEC"

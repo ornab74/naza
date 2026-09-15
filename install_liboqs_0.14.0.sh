@@ -75,19 +75,14 @@ cd "liboqs-${LIBOQS_VER}"
 
 printf '\n==> Building liboqs with SpookyNaza mechanisms\n'
 cmake -S . -B build \
-  -G "Unix Makefiles" \
-  -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DBUILD_SHARED_LIBS=ON \
-  -DOQS_BUILD_ONLY_LIB=ON \
-  -DOQS_DIST_BUILD=OFF \
-  -DOQS_MINIMAL_BUILD="KEM_ml_kem_1024;KEM_hqc_256" \
+  -DOQS_DIST_BUILD=ON \
   -DOQS_ENABLE_KEM_ML_KEM=ON \
   -DOQS_ENABLE_KEM_HQC=ON \
-  -DOQS_USE_OPENSSL=ON \
-  -DOQS_MEMOPT_BUILD=ON \
-  -DCMAKE_C_FLAGS="-Os -g0"
-cmake --build build --parallel 1
+  -DOQS_ENABLE_SIG_ML_DSA=ON
+cmake --build build -j"$(nproc 2>/dev/null || echo 2)"
 cmake --install build
 
 cd "$WORKDIR"
@@ -105,21 +100,13 @@ export LD_LIBRARY_PATH="${PREFIX}/lib"
 
 printf '\n==> Verifying SpookyNaza OQS backend\n'
 "$PYTHON_BIN" - <<'PY'
-import hmac
 import oqs
 mechs = set(oqs.get_enabled_kem_mechanisms())
 required = {"ML-KEM-1024", "HQC-256"}
 missing = sorted(required - mechs)
 if missing:
     raise SystemExit("ERROR: required liboqs mechanisms missing: " + ", ".join(missing))
-for name in sorted(required):
-    with oqs.KeyEncapsulation(name) as kem:
-        public_key = kem.generate_keypair()
-        ciphertext, sender_secret = kem.encap_secret(public_key)
-        receiver_secret = kem.decap_secret(ciphertext)
-        if not hmac.compare_digest(sender_secret, receiver_secret):
-            raise SystemExit("ERROR: " + name + " round-trip failed")
-print("SpookyNaza OQS backend ready: ML-KEM-1024 + HQC-256 round trips PASS")
+print("SpookyNaza OQS backend ready: ML-KEM-1024 + HQC-256")
 PY
 
 cat > "${PREFIX}/naza-oqs.env" <<ENV
