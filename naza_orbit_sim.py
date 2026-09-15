@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic orbital simulation lane for Naza scanner robustness tests.
 
-This module is deliberately a simulation and conditioning source. It does not
+This module is deliberately a *simulation* and conditioning source.  It does not
 claim to measure or identify a real spacecraft, and its position-derived values
-are not cryptographic entropy. The model is calibrated from the bundled
+are not cryptographic entropy.  The model is calibrated from the bundled
 Optus-X-positioning.csv anchor row and propagated with a two-body orbit plus
 first-order J2 secular drift.
 
 The orbital lane is intended to model a test assumption that an external,
-position-correlated nuisance source can bias local sensor state. Naza uses the
+position-correlated nuisance source can bias local sensor state.  Naza uses the
 lane only to condition scanner-integrity logic; it must never directly decide a
 food/road hazard label.
 """
@@ -35,6 +35,8 @@ LAUNCH_DATE_UTC = "2024-11-17"
 PERIGEE_ALT_KM = 688.0
 APOGEE_ALT_KM = 706.0
 INCLINATION_DEG = 97.4
+
+# Embedded fallback exactly matching the first row of the supplied CSV.
 FALLBACK_EPOCH = datetime(2026, 9, 15, 3, 15, 7, tzinfo=timezone.utc)
 FALLBACK_RAAN_DEG = 89.397366
 FALLBACK_ARG_PERIGEE_DEG = 127.307196
@@ -105,13 +107,22 @@ def orbital_constants() -> Dict[str, float]:
     raan_dot = -1.5 * J2 * n * (WGS84_A_KM / p) ** 2 * math.cos(inc)
     argp_dot = 0.75 * J2 * n * (WGS84_A_KM / p) ** 2 * (5.0 * math.cos(inc) ** 2 - 1.0)
     mean_dot = n + (
-        0.75 * J2 * n * (WGS84_A_KM / p) ** 2
-        * math.sqrt(1.0 - e * e) * (3.0 * math.cos(inc) ** 2 - 1.0)
+        0.75
+        * J2
+        * n
+        * (WGS84_A_KM / p) ** 2
+        * math.sqrt(1.0 - e * e)
+        * (3.0 * math.cos(inc) ** 2 - 1.0)
     )
     return {
-        "a_km": a, "e": e, "inc_rad": inc, "n_rad_s": n,
-        "raan_dot_rad_s": raan_dot, "argp_dot_rad_s": argp_dot,
-        "mean_dot_rad_s": mean_dot, "period_s": 2.0 * math.pi / n,
+        "a_km": a,
+        "e": e,
+        "inc_rad": inc,
+        "n_rad_s": n,
+        "raan_dot_rad_s": raan_dot,
+        "argp_dot_rad_s": argp_dot,
+        "mean_dot_rad_s": mean_dot,
+        "period_s": 2.0 * math.pi / n,
     }
 
 
@@ -133,8 +144,10 @@ def _gmst_rad(when: datetime) -> float:
     jd = when.timestamp() / 86400.0 + 2440587.5
     T = (jd - 2451545.0) / 36525.0
     gmst_deg = (
-        280.46061837 + 360.98564736629 * (jd - 2451545.0)
-        + 0.000387933 * T * T - T * T * T / 38710000.0
+        280.46061837
+        + 360.98564736629 * (jd - 2451545.0)
+        + 0.000387933 * T * T
+        - T * T * T / 38710000.0
     )
     return math.radians(gmst_deg % 360.0)
 
@@ -164,6 +177,7 @@ def _position_feature(timestamp_utc: str, lat: float, lon: float, alt: float, ph
     canonical = f"{timestamp_utc}|{lat:.9f}|{lon:.9f}|{alt:.6f}|{phase:.12f}".encode("ascii")
     digest = hashlib.sha256(canonical).digest()
     seed = int.from_bytes(digest[:8], "big", signed=False)
+    # Deterministic 53-bit mantissa-scale feature.  This is NOT secret entropy.
     u53 = (seed >> 11) & ((1 << 53) - 1)
     return seed, u53 / float(1 << 53)
 
@@ -179,9 +193,12 @@ def propagate(when: Optional[datetime] = None, anchor: Optional[Anchor] = None) 
     c = orbital_constants()
     dt_s = (when - anchor.epoch).total_seconds()
 
-    raan = (math.radians(anchor.raan_deg) + c["raan_dot_rad_s"] * dt_s) % (2.0 * math.pi)
-    argp = (math.radians(anchor.arg_perigee_deg) + c["argp_dot_rad_s"] * dt_s) % (2.0 * math.pi)
-    M = (math.radians(anchor.mean_anomaly_deg) + c["mean_dot_rad_s"] * dt_s) % (2.0 * math.pi)
+    raan = math.radians(anchor.raan_deg) + c["raan_dot_rad_s"] * dt_s
+    argp = math.radians(anchor.arg_perigee_deg) + c["argp_dot_rad_s"] * dt_s
+    M = math.radians(anchor.mean_anomaly_deg) + c["mean_dot_rad_s"] * dt_s
+    raan = raan % (2.0 * math.pi)
+    argp = argp % (2.0 * math.pi)
+    M = M % (2.0 * math.pi)
 
     E = _kepler(M, c["e"])
     nu = 2.0 * math.atan2(
@@ -232,19 +249,44 @@ def propagate(when: Optional[datetime] = None, anchor: Optional[Anchor] = None) 
         "altitude_norm_0_1": alt_norm,
         "position_seed_u64": seed,
         "position_entropy_feature_0_1": position_feature,
-        "eci_x_km": x_eci, "eci_y_km": y_eci, "eci_z_km": z_eci,
-        "ecef_x_km": x_ecef, "ecef_y_km": y_ecef, "ecef_z_km": z_ecef,
+        "eci_x_km": x_eci,
+        "eci_y_km": y_eci,
+        "eci_z_km": z_eci,
+        "ecef_x_km": x_ecef,
+        "ecef_y_km": y_ecef,
+        "ecef_z_km": z_ecef,
     }
 
 
 CSV_FIELDS = [
-    "record_type", "timestamp_utc", "sim_id", "launch_date_utc",
-    "perigee_alt_km", "apogee_alt_km", "inclination_deg",
-    "latitude_deg", "longitude_deg", "altitude_km", "speed_km_s",
-    "raan_deg", "arg_perigee_deg", "mean_anomaly_deg", "orbital_phase_0_1",
-    "lat_sin", "lat_cos", "lon_sin", "lon_cos", "altitude_norm_0_1",
-    "position_seed_u64", "position_entropy_feature_0_1",
-    "eci_x_km", "eci_y_km", "eci_z_km", "ecef_x_km", "ecef_y_km", "ecef_z_km",
+    "record_type",
+    "timestamp_utc",
+    "sim_id",
+    "launch_date_utc",
+    "perigee_alt_km",
+    "apogee_alt_km",
+    "inclination_deg",
+    "latitude_deg",
+    "longitude_deg",
+    "altitude_km",
+    "speed_km_s",
+    "raan_deg",
+    "arg_perigee_deg",
+    "mean_anomaly_deg",
+    "orbital_phase_0_1",
+    "lat_sin",
+    "lat_cos",
+    "lon_sin",
+    "lon_cos",
+    "altitude_norm_0_1",
+    "position_seed_u64",
+    "position_entropy_feature_0_1",
+    "eci_x_km",
+    "eci_y_km",
+    "eci_z_km",
+    "ecef_x_km",
+    "ecef_y_km",
+    "ecef_z_km",
 ]
 
 
@@ -270,7 +312,10 @@ def export_csv(path: Path, start: Optional[datetime] = None, count: int = 121, s
             clean = {}
             for k in CSV_FIELDS:
                 v = row.get(k)
-                clean[k] = f"{v:.12f}".rstrip("0").rstrip(".") if isinstance(v, float) else v
+                if isinstance(v, float):
+                    clean[k] = f"{v:.12f}".rstrip("0").rstrip(".")
+                else:
+                    clean[k] = v
             w.writerow(clean)
     os.replace(tmp, path)
     return path

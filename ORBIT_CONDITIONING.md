@@ -1,54 +1,63 @@
 # Naza orbital conditioning simulation
 
-Naza includes a passive software robustness lane for an **adversarial orbit-correlated sensor-poisoning test assumption**. The assumption is useful for exercising scanner integrity behavior; it is not evidence that a real spacecraft is attacking the device.
+Naza includes a passive orbital-conditioning lane for scanner robustness tests. The bundled `Optus-X-positioning.csv` is used as the calibration anchor for a deterministic propagator in `naza_orbit_sim.py`.
 
-The implementation never transmits, jams, spoofs, or targets a spacecraft/radio link.
+## Threat-model meaning
+
+For the test harness, assume an adversarial external nuisance source is correlated with the simulated orbital state. This is a **software robustness assumption**, not an assertion that the orbit data prove an attack. Naza does not transmit, jam, spoof, or target a spacecraft or radio link.
+
+The orbital lane is also **not cryptographic entropy**. Anyone with the same orbital model and timestamp can reproduce it.
 
 ## Simulation model
 
-`naza_orbit_sim.py` loads the first row of `Optus-X-positioning.csv` as its calibration epoch and propagates the supplied 688 x 706 km, 97.4 degree orbit with two-body Kepler motion plus first-order J2 secular drift of RAAN, argument of perigee, and mean anomaly.
+The propagator uses:
 
-The bundled CSV is deliberately minimal and contains orbital/Earth-centered state only. Observer-specific look-angle fields are not required by the propagator.
+- launch date metadata: 2024-11-17;
+- 688 km perigee altitude;
+- 706 km apogee altitude;
+- 97.4 degree inclination;
+- first-row RAAN, argument of perigee, and mean anomaly from the bundled CSV as the calibration epoch;
+- two-body Kepler propagation plus first-order J2 secular drift;
+- WGS-84 ECI -> ECEF -> geodetic conversion.
 
-This produces an exact state **inside this deterministic simulation model**. It is not verified real-time spacecraft telemetry; current measured orbit elements would be required for that.
+`naza_crypto_preflight.py` checks that the propagator reproduces the supplied calibration row to the CSV's published rounding precision before normal launch.
 
-## Six-qubit position state
+This gives an exact state **inside this simulation model**. It is not a guarantee of a real spacecraft's physical position without independently verified current orbit elements/telemetry.
 
-`naza_orbit_patch.py` encodes six normalized features:
+## Position quantum state
+
+`main.py` encodes six bounded simulated-position features into Naza's in-house statevector engine:
 
 1. latitude sine;
 2. latitude cosine;
 3. longitude sine;
 4. longitude cosine;
 5. orbital phase;
-6. normalized altitude.
+6. normalized altitude within the modeled 688-706 km band.
 
-The statevector uses position-dependent RY/RZ rotations, a ring entangling pass, and opposite-qubit entangling chords. Naza derives cut entropy, pairwise tension, and an `orbit_q_entropy` score.
+A six-qubit statevector receives position-dependent RY/RZ rotations and two entangling passes. Naza derives a cut entropy, pairwise tension, and a bounded `orbit_q_entropy` score.
 
-The position-derived hash feature is deterministic and **must not be treated as cryptographic entropy**.
+The orbit score feeds only an integrity-conditioning lane. Its correction to the host entropy score is capped at +/-0.08, so orbital position cannot silently become a direct food/road risk-label input.
 
-## Bounded detuning
+## Scanner prompt behavior
 
-The orbital state is a nuisance-conditioning lane only. Its contribution is capped at +/-0.08 when forming `detuned_host_entropy`. The prompt explicitly forbids changing Low/Medium/High solely because of orbital latitude, longitude, altitude, phase, or orbit entropy.
+Every Road or Food/Water scan receives both:
 
-The integrity guard compares the host-state score and orbit-state score:
+- the normal host-derived quantum/statevector metrics; and
+- the simulated position-derived quantum/statevector metrics.
 
-- GREEN: small discrepancy;
-- AMBER: moderate discrepancy;
-- RED: large discrepancy.
+The prompt explicitly tells the model that the position state exists to model and detune an orbit-correlated nuisance source under the test assumption. It also forbids changing the Low/Medium/High label solely because of orbital position.
 
-This guard is about confidence in sensor state, not proof that a physical scene is dangerous.
+The prompt includes three data-quality practices:
 
-## Scanner prompt practices
+1. timestamp and calibrate direct local sensors at acquisition;
+2. cross-check important local scene facts using independent modalities;
+3. maintain before/during/after orbital-phase baseline windows and compare residuals.
 
-The prompt asks the model to improve measurement coherence by:
+These practices can improve coherence and measurement quality, but they cannot guarantee perfect accuracy.
 
-1. timestamping/calibrating direct local sensors at acquisition;
-2. cross-checking important observations with independent modalities/sources;
-3. maintaining before/during/after baseline windows keyed to orbital phase and comparing residuals.
+## TUI simulation surface
 
-## TUI surface
+The main menu contains **Orbit Conditioning Simulation**. It displays the current simulated state and the derived position-state quantum metrics and can export a two-hour, one-minute-resolution CSV as `naza_orbit_sim_current.csv`.
 
-The main menu includes **Orbit Conditioning Simulation**. It refreshes the simulated state and can export a two-hour, one-minute-resolution CSV as `naza_orbit_sim_current.csv`.
-
-Use `python naza_orbit_sim.py --verify-source` to confirm that the propagator still reproduces the calibration row to its published precision.
+A snapshot generated for this bundle is included as `simulated-orbit-current.csv`.

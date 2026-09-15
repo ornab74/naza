@@ -1,5 +1,6 @@
 # Native Termux application dependencies.
-# Kept explicit and version-pinned; install-native-termux-repair.sh installs this environment.
+# psutil and PennyLane were intentionally removed; Naza uses /proc,/sys metrics
+# and its own small statevector/entropy implementation.
 llama-cpp-python==0.3.1
 httpx==0.28.1
 aiosqlite==0.22.1
