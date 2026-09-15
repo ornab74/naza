@@ -67,8 +67,10 @@ cd "$NAZA_DIR"
 "$VENV/bin/python" \
     "$NAZA_DIR/naza_crypto_preflight.py"
 
+# Keep the risk reading focused on the Low/Medium/High result. The receipt is
+# still generated internally for compatibility, but it is not shown in the TUI.
 exec "$VENV/bin/python" \
     -u \
     "$NAZA_DIR/main.py" \
-    "$@"
-
+    "$@" \
+    > >(sed -u '/receipt /d')
