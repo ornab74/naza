@@ -24,12 +24,22 @@ safe_file "$VENV/bin/python" || { echo "ERROR: unsafe Python runtime permissions
 OQS_LIB="$(find "$OQS/lib" -maxdepth 1 -name 'liboqs.so*' -print -quit 2>/dev/null || true)"
 [ -n "$OQS_LIB" ] && safe_file "$OQS_LIB" || { echo "ERROR: pinned liboqs backend missing/unsafe" >&2; exit 1; }
 
+PURELIB="$($VENV/bin/python - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()['purelib'])
+PY
+)"
+LLAMA_LIB="$PURELIB/llama_cpp/lib"
+[ -f "$LLAMA_LIB/libllama.so" ] || { echo "ERROR: llama-cpp-python native library missing: $LLAMA_LIB/libllama.so" >&2; exit 1; }
+safe_file "$LLAMA_LIB/libllama.so" || { echo "ERROR: unsafe llama native library permissions" >&2; exit 1; }
+
 export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
 export VIRTUAL_ENV="$VENV"
 export PATH="$VENV/bin:$PATH"
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT
 export OQS_INSTALL_PATH="$OQS"
-export LD_LIBRARY_PATH="$OQS/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LLAMA_CPP_LIB_PATH="$LLAMA_LIB"
+export LD_LIBRARY_PATH="$LLAMA_LIB:$OQS/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export NAZA_CRYPTO_MODE=tri
 export NAZA_REQUIRE_PROCESS_HARDENING=1
 export PYTHONUNBUFFERED=1
