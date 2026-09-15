@@ -1,44 +1,27 @@
-# Required Termux keystore + fingerprint unlock
+# Native Termux Gate 3 unlock
 
-For the Termux + Ubuntu-proot installation, the Android/Termux keystore unlock is **required**.
-It is not an optional integration.
+Naza now runs directly in **native Termux**. The older guest-runtime launch path and biometric-specific Termux API are not part of Gate 3.
 
-`termux-keystore` and `termux-fingerprint` execute on the **Termux host**, not inside Ubuntu proot. The installer creates or verifies the `naza-unlock` RSA key before Ubuntu setup is allowed to continue.
+Gate 3 uses an Android Keystore RSA-2048 key named `naza-unlock`. Setup verifies that the alias is inside secure hardware, requires Android user authentication, is hardware-enforced, and has a 10-second authorization validity window.
 
-The command enforced by `termux-naza-autosetup/setup.sh` is:
+## Unlock flow
+
+Run:
 
 ```bash
-termux-keystore generate naza-unlock -a RSA -s 2048 -u 10
+bash ~/naza/naza_unlock.sh
 ```
 
-The setup then verifies that `naza-unlock` appears in `termux-keystore list`. If creation or verification fails, setup stops.
+The helper creates a fresh random 256-bit challenge, asks `termux-keystore` to sign it with `SHA256withRSA`, and derives the existing 64-character Naza token from `SHA256(challenge || signature)`. Challenge/signature files are owner-only and removed after use; the token is atomically installed as `~/.naza/unlock.token` with mode `0600`.
 
-At launch, `naza_unlock.sh`:
+Authentication is enforced by the Android Keystore policy attached to the non-exportable hardware-backed key. No separate biometric-specific Termux command is required.
 
-1. verifies the required keystore alias exists;
-2. requests fingerprint authentication through Termux:API;
-3. signs a local random challenge with the Android-backed key;
-4. derives a short-lived unlock token;
-5. allows `naza_boot.sh` to start Naza inside Ubuntu proot.
+Then start Naza:
 
-The Ubuntu side receives the gate token through inherited descriptor 9, leaving
-interactive standard input untouched. Normal boot streams the token without
-creating a host or guest token file. Both installation and
-application sessions use `proot-distro --isolated`; Termux home, shared storage,
-and nonessential Android paths are not mounted into the guest. The Android
-keystore key itself is never copied into proot.
+```bash
+bash ~/naza/run_naza.sh
+```
 
-The private challenge is intentionally stable: its deterministic RSA signature
-derives the repeatable passphrase used by fingerprint-gated NKEY4 files. The
-challenge is not an authentication token and is kept owner-only. Rotating or
-deleting it requires rewrapping the data key first.
+## Trust boundary
 
-The setup and every unlock inspect detailed key metadata and fail closed unless
-the alias is RSA-2048 and requires Android user authentication. Core dumps are
-disabled and the runtime file-descriptor limit is constrained.
-
-PRoot is compatibility isolation, not a security sandbox: it provides no
-separate Android UID, seccomp boundary, or cgroup boundary. A process that has
-already compromised the Termux UID remains inside the Termux trust domain. Full
-same-UID resistance requires a dedicated Android broker application running as
-a separate UID and verifying each launch request itself.
+The hardware key is non-exportable, but the derived token exists inside the Termux UID while Naza starts. Naza adds owner-only files, process hardening, runtime permission checks, and authenticated encrypted storage. These measures improve local resistance; they do not make a fully compromised Android/Termux UID harmless.
