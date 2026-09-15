@@ -6,13 +6,13 @@ Naza is a local encrypted LLM CLI/TUI with road and food/water environmental sca
 
 ![Naza SecureLLM TUI](https://raw.githubusercontent.com/ornab74/naza/refs/heads/main/demonaza.png)
 
-## Current Android build: native Termux
+## Supported build: native Termux
 
-The supported Android environment is **native Google Play Termux on Android 15 / API 35 / aarch64**. The older Ubuntu guest runtime is retired, and Naza does not use a biometric-specific Termux API for Gate 3.
+The supported Android environment is native Google Play Termux on Android 15 / API 35 / aarch64. The old Ubuntu/PRoot runtime and fingerprint-specific Termux API path are retired.
 
-Gate 3 is implemented with a **hardware-backed Android Keystore key** through `termux-keystore`. Naza uses an RSA-2048 `naza-unlock` alias configured for Android user authentication with a 10-second validity window. The unlock helper signs a fresh random challenge and derives Naza's short-lived 64-hex token from that signature. See [`TERMUX_UNLOCK.md`](TERMUX_UNLOCK.md).
+Gate 3 uses a hardware-backed Android Keystore key through `termux-keystore`. Naza verifies an RSA-2048 `naza-unlock` alias with hardware-enforced user authentication and a 10-second authorization window, then derives the short-lived unlock token from a freshly signed random challenge. See `TERMUX_UNLOCK.md`.
 
-### Install or reconcile an existing build
+### Install / reconcile
 
 ```bash
 pkg update -y
@@ -22,20 +22,46 @@ cd naza
 bash install-native-termux-repair.sh
 ```
 
-The installer is reconciliation-oriented: it preserves `.enc_key`, encrypted chat history, models, and private runtime data; it does **not** automatically rekey Naza.
+The repair path preserves existing `.enc_key`, encrypted history, models, and application data. It does not automatically rekey Naza.
 
-After setup:
+After installation:
 
 ```bash
 bash ~/naza/naza_unlock.sh
 bash ~/naza/run_naza.sh
 ```
 
+## Android llama-cpp-python repair
+
+`llama-cpp-python==0.3.1` is built from source with a single CMake build job when the existing installation cannot be loaded. The installer:
+
+- locates the package-local `libllama.so`;
+- exports `LLAMA_CPP_LIB_PATH` to that native library directory;
+- adds the directory to `LD_LIBRARY_PATH`;
+- patches the 0.3.1 Android platform classification before importing the package when required;
+- performs a direct `ctypes.CDLL` load before accepting the Python import;
+- verifies the `llama_cpp.Llama` API in the same venv used by `run_naza.sh`.
+
+This catches the Android failure mode where pip reports the package installed but the native shared library cannot actually be resolved.
+
+## Minimal liboqs build
+
+liboqs is pinned to **0.14.0** and liboqs-python to upstream commit `7906e7879a099fa34217035957d977314f99757d`. Downloads are SHA-256 verified before extraction/install.
+
+To keep Android RAM/build pressure low, the canonical build uses:
+
+```text
+OQS_BUILD_ONLY_LIB=ON
+OQS_DIST_BUILD=OFF
+OQS_MINIMAL_BUILD=KEM_ml_kem_1024;KEM_hqc_256
+cmake --build ... --parallel 1
+```
+
+Only the two KEMs Naza needs are accepted: **ML-KEM-1024** and **HQC-256**. Installation/preflight performs real encapsulation/decapsulation round trips for both.
+
 ## Dependency cleanup
 
-`psutil` and PennyLane are no longer runtime dependencies. Metrics come directly from `/proc` and `/sys`; Naza's entropy/entanglement-inspired signal uses its in-house small statevector implementation.
-
-The native dependency set is pinned in `requirements.in` / `requirements.txt`. The old scientific stack that came with PennyLane (`pennylane-lightning`, `rustworkx`, `scipy`, and `scipy-openblas32`) is intentionally absent from the Android runtime.
+PennyLane and psutil are not runtime dependencies. Host metrics come directly from `/proc` and `/sys`; Naza's entropy/entanglement-inspired signal uses its own small statevector implementation.
 
 ## Cryptographic architecture
 
@@ -48,51 +74,69 @@ HKDF-SHA512
 AES-256-GCM
 ```
 
-The implementation is in `spooky_combiner.py` and `spooky_trihybrid.py`. The native liboqs backend is pinned to **0.14.0**; the Python wrapper is pinned to upstream commit `7906e7879a099fa34217035957d977314f99757d`. Both `ML-KEM-1024` and `HQC-256` are required.
+`spooky_combiner.py` and `spooky_trihybrid.py` are experimental Naza research constructions, not standardized protocols and not independently cryptanalyzed. See `SPOOKY_COMBINER_RESEARCH.md` and `SPOOKY_TRIHYBRID.md`.
 
-SpookyCombiner-1 and the tri-hybrid envelope are **experimental Naza research constructions**, not NIST-standardized protocols and not independently cryptanalyzed. Transcript binding, domain-separated HKDF lanes, AEAD, strict parsing and generic authentication failures are implementation hardening—not a substitute for formal analysis or third-party review. See [`SPOOKY_COMBINER_RESEARCH.md`](SPOOKY_COMBINER_RESEARCH.md) and [`SPOOKY_TRIHYBRID.md`](SPOOKY_TRIHYBRID.md).
+## Orbit-conditioned scanner robustness simulation
 
-## Native runtime hardening
+The scanner has a passive software-only robustness lane for an **adversarial orbit-correlated sensor-poisoning test assumption**. This is a threat-model input for testing; it is not evidence that an identified real spacecraft is attacking the device.
 
-The current path uses:
+`naza_orbit_sim.py` is calibrated from the sanitized `Optus-X-positioning.csv` and propagates a deterministic two-body + first-order J2 simulation. The calibration CSV contains orbital/Earth-centered state only; observer-specific look-angle fields are not carried in this repo version.
 
-- `umask 077` and owner-only sensitive files;
-- Android Keystore hardware-auth Gate 3;
-- `libtermux-exec.so` only for native Termux executable compatibility, never a libpython preload;
-- process non-dumpability and `no_new_privs` enforcement at normal launch;
-- private atomic storage and recoverable encrypted-file replacement;
-- pinned/digest-verified liboqs source;
-- startup crypto preflight and syntax/smoke checks.
+At scan time, `naza_orbit_patch.py` creates a separate six-qubit in-house statevector from simulated latitude/longitude geometry, orbital phase, normalized altitude, and a deterministic position feature. It derives a position-state entropy/tension score and uses it only as a nuisance-conditioning lane.
 
-## Environmental/scanner concepts
+The correction to host-state entropy is hard-capped at **±0.08**. Prompt rules explicitly forbid orbital latitude, longitude, altitude, phase, or `orbit_q_entropy` from directly selecting Low/Medium/High. The lane can affect scanner confidence/integrity only.
 
-The unified `main.py` includes Road Scanner and Food/Water Scanner modes. Prompts combine user observations with local system/environmental metrics and Naza's experimental entropy-derived signal.
+The prompt also asks the scanner to improve coherence by:
 
-That entropy signal is a **software-derived heuristic feature**, not a physical quantum sensor. The in-house statevector path replaces the old PennyLane dependency while retaining the research concept: observables, correlation terms, and a reduced-state von Neumann entropy contribution are computed internally.
+1. timestamping/calibrating direct local sensors at acquisition;
+2. cross-checking important observations with independent modalities/sources;
+3. maintaining before/during/after orbital-phase baselines and comparing residuals.
 
-## Main files
+The main menu exposes **Orbit Conditioning Simulation**, which refreshes the current simulated state and can export a fresh two-hour CSV. Position-derived values are deterministic simulation features, **not cryptographic entropy and not verified live telemetry**.
 
-- `main.py` — unified TUI, scanners, encrypted storage integration, key workflows, research lab.
-- `install-native-termux-repair.sh` — native Termux install/reconciliation path.
+See `ORBIT_CONDITIONING.md` and `SCANNER_PROMPT_ORBIT_LAYER.md`.
+
+## Repository layout
+
+- `main.py` — small hardened entrypoint; installs runtime patches then starts Naza.
+- `naza_core.py` — preserved application core: TUI, scanners, encrypted storage/key workflows, research lab.
+- `naza_orbit_patch.py` — bounded six-qubit position-state circuit, prompt conditioning, simulation menu surface.
+- `naza_orbit_sim.py` — deterministic CSV-calibrated orbital propagator/exporter.
+- `Optus-X-positioning.csv` — sanitized minimal simulation calibration ephemeris.
+- `install-native-termux-repair.sh` — native Termux reconcile/install path.
+- `install_liboqs_0.14.0.sh` — pinned minimal one-job OQS build helper.
 - `naza_unlock.sh` — Android Keystore Gate 3 challenge/sign/token helper.
-- `run_naza.sh` — hardened native launcher.
+- `run_naza.sh` — hardened native launcher, offline by default.
+- `naza_crypto_preflight.py` — fail-closed llama/OQS/tri-hybrid/orbit runtime checks.
 - `naza_storage.py` — private atomic writes, locking, rotation journal/recovery.
-- `install_liboqs_0.14.0.sh` — pinned and digest-verified OQS build helper.
-- `spooky_combiner.py` — experimental ML-KEM-1024 + HQC-256 combiner.
-- `spooky_trihybrid.py` — combiner + X25519 NKEY4 envelope.
+
+## Runtime hardening
+
+Normal launch:
+
+- uses owner-private defaults (`umask 077`);
+- uses `libtermux-exec.so` only for native Termux execution compatibility, never libpython preload;
+- requires process non-dumpability / `no_new_privs` through the application hardening path;
+- strips proxy environment variables and defaults to `NAZA_OFFLINE_MODE=1`;
+- requires the calibrated orbital CSV to be a regular non-symlink file;
+- discovers and verifies the package-local llama native library before runtime;
+- runs `naza_crypto_preflight.py` before starting `main.py`.
+
+For a deliberate trusted model-download maintenance session, set `NAZA_OFFLINE_MODE=0`; model digest verification remains required.
 
 ## Validation
 
+Useful checks:
+
 ```bash
-python -m py_compile main.py naza_storage.py spooky_combiner.py spooky_trihybrid.py
-bash -n install-native-termux-repair.sh
-bash -n naza_unlock.sh
-bash -n run_naza.sh
+python -m py_compile main.py naza_core.py naza_orbit_patch.py naza_orbit_sim.py naza_crypto_preflight.py naza_storage.py spooky_combiner.py spooky_trihybrid.py
+python naza_orbit_sim.py --verify-source
+bash -n install-native-termux-repair.sh install_liboqs_0.14.0.sh naza_unlock.sh run_naza.sh
 python -m unittest discover -s tests -v
 ```
 
-Existing NKEY2/NKEY3 material remains readable. NKEY4 is the default for new/rotated keys. Setup never silently migrates or rekeys existing encrypted data.
+Existing NKEY2/NKEY3 material remains readable. NKEY4 is the default for new/rotated keys. The repair path does not silently migrate or rekey existing encrypted data.
 
 ## License
 
-See [`LICENSE`](LICENSE).
+See `LICENSE`.
