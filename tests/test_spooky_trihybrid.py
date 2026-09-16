@@ -59,7 +59,10 @@ class TriHybridTests(unittest.TestCase):
             path = Path(folder) / '.enc_key'
             scope = dict(hmac=hmac, Optional=__import__('typing').Optional, os=os, tri=tri, storage=storage, KEY_PATH=path,
                          KEY_FLAG_PASSPHRASE=1, _OQS=FakeOQS(), AESGCM=AESGCM,
+                         NKEY4_VERSION=2,
                          _hybrid_kek=lambda salt, pw, lane: sc._hkdf((pw or '').encode(), salt, lane, 32),
+                         _nkey4_protector=lambda salt, pw, version: sc._hkdf(
+                             (pw or 'machine').encode(), salt, b'TRI' if version == 1 else b'nkey4-v2', 32),
                          _atomic_write_private=lambda p, data: (p.write_bytes(data), p.chmod(0o600)),
                          _assert_private_regular=lambda *a: None, _pw_guard=lambda: None,
                          _pw_ok=lambda: None, _pw_fail=lambda: None, SpookyCombinerError=sc.SpookyCombinerError)
@@ -70,12 +73,29 @@ class TriHybridTests(unittest.TestCase):
             self.assertEqual(scope['load_data_key']('secret'), self.payload)
             with self.assertRaises(sc.SpookyCombinerError):
                 scope['load_data_key']('wrong')
+            scope['_pw_ok']()
+
+            salt = os.urandom(16)
+            legacy_header = b'NKEY4' + bytes([1, 1]) + salt
+            legacy_protector = scope['_hybrid_kek'](salt, 'secret', b'TRI')
+            path.write_bytes(legacy_header + tri.create_envelope(
+                self.payload, legacy_protector, FakeOQS(), legacy_header
+            ))
+            path.chmod(0o600)
+            self.assertEqual(scope['load_data_key']('secret'), self.payload)
+            self.assertEqual(path.read_bytes()[5], 2)
+            original = path.read_bytes()
+
             scope['_OQS'] = None
             with self.assertRaises(sc.SpookyCombinerError):
-                scope['save_wrapped_key'](os.urandom(32))
+                scope['save_wrapped_key'](os.urandom(32), 'secret')
             with self.assertRaises(sc.SpookyCombinerError):
                 scope['load_data_key']('secret')
             self.assertEqual(path.read_bytes(), original)
+
+            scope['_OQS'] = FakeOQS()
+            scope['save_wrapped_key'](self.payload, None)
+            self.assertEqual(scope['load_data_key'](), self.payload)
 
 
 if __name__ == '__main__':

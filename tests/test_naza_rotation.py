@@ -27,9 +27,11 @@ class RotationTests(unittest.TestCase):
         os.chdir(self.temp.name)
         self.ns = dict(Optional=Optional, Path=Path, os=os, hmac=hmac, hashlib=hashlib, json=json,
             AESGCM=AESGCM, tri=tri, storage=storage, _OQS=FakeOQS(), KEY_FLAG_PASSPHRASE=1,
+            NKEY4_VERSION=2,
             ENCRYPTED_MODEL=Path('model.aes'), DB_PATH=Path('db.aes'), KEY_PATH=Path('.enc_key'),
             LOCK_PATH=Path('lock.json'), MAC_SUFFIX='.mac',
             _hybrid_kek=lambda salt, pw, lane: sc._hkdf((pw or '').encode(), salt, lane, 32),
+            _nkey4_protector=lambda salt, pw, version: sc._hkdf((pw or 'machine').encode(), salt, b'nkey4-v2', 32),
             _mac_key=lambda key: sc._hkdf(key, b'salt', b'mac', 32),
             _assert_private_regular=lambda path, label: storage.regular(path))
         exec(compile(subset, 'main.py', 'exec'), self.ns)
@@ -52,7 +54,7 @@ class RotationTests(unittest.TestCase):
             expected = hmac.new(self.ns['_mac_key'](key), path.read_bytes(), hashlib.sha256).digest()
             self.assertEqual(Path(str(path) + '.mac').read_bytes(), expected)
         blob = self.ns['KEY_PATH'].read_bytes()
-        protector = self.ns['_hybrid_kek'](blob[7:23], 'gate', b'TRI')
+        protector = self.ns['_nkey4_protector'](blob[7:23], 'gate', blob[5])
         self.assertEqual(tri.open_envelope(blob[23:], protector, self.ns['_OQS'], blob[:23]), key)
         self.assertFalse(Path('.naza-rotation').exists())
 

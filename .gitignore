@@ -12,6 +12,7 @@ venv-termux/
 *.a
 *.o
 build/
+.local/
 cmake-build-*/
 
 # Release output

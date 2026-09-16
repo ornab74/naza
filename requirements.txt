@@ -27,19 +27,15 @@ anyio==4.15.1 \
 appdirs==1.4.4 \
     --hash=sha256:7d5d0167b2b1ba821647616af46a749d1c653740dd0d2415100fe26e27afdf41 \
     --hash=sha256:a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128
-    # via pennylane
 autograd==1.9.1 \
     --hash=sha256:7818c5c69ddf9efb7da74097bd741a4c7920133f41966f68537223a15ef798bc \
     --hash=sha256:b788bae3fa010cbffb4cfb7b8ba2a3f0daa6072a8506da6164c779fe9cf3e05a
-    # via pennylane
 autoray==0.11.0 \
     --hash=sha256:2e9ca95070834574e054162ee02946d2414f7821f65960308b95f49d08ee9227 \
     --hash=sha256:ef9c23d8307f2e5030d10dd222d304401450157172a6fcc6f7456b6e82681bf4
-    # via pennylane
 cachetools==7.1.8 \
     --hash=sha256:1221d547a0b24b7f26fa891d40d488b5258beab9aebd8ed68c729be3af849c43 \
     --hash=sha256:a81e3844acaa7355b6567f97bd67a94a14ec3a9bc2cbbdae45b9592cc036775b
-    # via pennylane
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
@@ -382,7 +378,6 @@ cryptography==46.0.1 \
 diastatic-malt==2.15.3 \
     --hash=sha256:bc99f842a35e4f2594488ac231b8594011e4e11eea0fc661a98a554dff60d1c3 \
     --hash=sha256:f41aeff992bd07553b85a5947700452f551d419d439ab34464bca4f30dc2a6a1
-    # via pennylane
 diskcache==5.6.3 \
     --hash=sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc \
     --hash=sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19
@@ -507,7 +502,6 @@ markupsafe==3.0.3 \
 networkx==3.6.1 \
     --hash=sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509 \
     --hash=sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762
-    # via pennylane
 numpy==2.5.3 \
     --hash=sha256:012e66aca395d795496446e52aeeb5866312a5d4d3f27da270e5a0b43f70dc5c \
     --hash=sha256:09d5a423c71ad5feb5625844ad58050e35df43871004b52ac9c0ad44a56775be \
@@ -578,55 +572,13 @@ numpy==2.5.3 \
     # via
     #   autograd
     #   llama-cpp-python
-    #   pennylane
     #   rustworkx
     #   scipy
 packaging==26.3 \
     --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-    # via pennylane
-pennylane==0.41.0 \
-    --hash=sha256:0cbd653c36e333e86ea72b67ddecd22c164f7ad6e4cdf6b9033dc5bc2df04cb6
     # via
     #   -r requirements.in
-    #   pennylane-lightning
-pennylane-lightning==0.43.0 \
-    --hash=sha256:0961e3fab868dbe3e020d466d23d315277431966ed5b850f25ee6c5111b0553a \
-    --hash=sha256:165dba4748398b5852b91be312f690ee5567b860f054d7fbb6270da6b68f7e84 \
-    --hash=sha256:2071e116c03c82a29a036ec0f529e29cabad248f3595c36a40452fcec1f13353 \
-    --hash=sha256:278a5c978d75aa5c1e76384f9365db9088d6ec01f1c4037d65efd1432616ada4 \
-    --hash=sha256:32eb8fa0332b54969bb4693e4bd15e96273bc15e0e81af9b29b8a516a407453d \
-    --hash=sha256:35bab12effe2ce3c652fef86ce2c32c5140c5e9c895d172fe99b77dceabe35cf \
-    --hash=sha256:3c4017557c84ed4334b05e2e33ef40407474195247f8e97434c097c8cef1f5e3 \
-    --hash=sha256:44820f846805d0919f3a85cdfc8938913af3c99418729d01cf1a6c3de7d862ba \
-    --hash=sha256:655e66b853fea413dd59b2438ee3f3a7bbe7e2975f0c29db8c26de7debc43955 \
-    --hash=sha256:6b9be22f8290e2758b78faa57b8c789bb472cce5637a896a10c9c88772aa183c \
-    --hash=sha256:6fc236ff206866d7ef5deed733a3bef719b0bda0476be577983a7bda8c516c68 \
-    --hash=sha256:8d24c919c7508aaa8e54b51d5626890c730204f78c52556bb559273b85d792dc \
-    --hash=sha256:cfa8422b7827b4be6240f6b52b298c91811bd50ab7b9702d6ea02282c4d559af \
-    --hash=sha256:e4e27d0f892ba587e0fe274a9a349fbbdd5727ed898223a65c9d049a6f7609c1 \
-    --hash=sha256:e8b43cf012ee79579a6ad4591eca8cf05519ac04fae00189ad485325817c14bf \
-    --hash=sha256:ee6f34d4733be0e1d1ba1a12b3a9d3672c9fa455786dbc062176bfe028d6c69d \
-    --hash=sha256:f8ac2d58d48133728bbb801cbf6f8f58808b878b44c32143a01ef703658a6d14
-    # via pennylane
-psutil==6.1.1 \
-    --hash=sha256:018aeae2af92d943fdf1da6b58665124897cfc94faa2ca92098838f83e1b1bca \
-    --hash=sha256:0bdd4eab935276290ad3cb718e9809412895ca6b5b334f5a9111ee6d9aff9377 \
-    --hash=sha256:1924e659d6c19c647e763e78670a05dbb7feaf44a0e9c94bf9e14dfc6ba50468 \
-    --hash=sha256:33431e84fee02bc84ea36d9e2c4a6d395d479c9dd9bba2376c1f6ee8f3a4e0b3 \
-    --hash=sha256:384636b1a64b47814437d1173be1427a7c83681b17a450bfc309a1953e329603 \
-    --hash=sha256:6d4281f5bbca041e2292be3380ec56a9413b790579b8e593b1784499d0005dac \
-    --hash=sha256:8be07491f6ebe1a693f17d4f11e69d0dc1811fa082736500f649f79df7735303 \
-    --hash=sha256:8df0178ba8a9e5bc84fed9cfa61d54601b371fbec5c8eebad27575f1e105c0d4 \
-    --hash=sha256:97f7cb9921fbec4904f522d972f0c0e1f4fabbdd4e0287813b21215074a0f160 \
-    --hash=sha256:9ccc4316f24409159897799b83004cb1e24f9819b0dcf9c0b68bdcb6cefee6a8 \
-    --hash=sha256:b6e06c20c05fe95a3d7302d74e7097756d4ba1247975ad6905441ae1b5b66003 \
-    --hash=sha256:c777eb75bb33c47377c9af68f30e9f11bc78e0f07fbf907be4a5d70b2fe5f030 \
-    --hash=sha256:ca9609c77ea3b8481ab005da74ed894035936223422dc591d6772b147421f777 \
-    --hash=sha256:cf8496728c18f2d0b45198f06895be52f36611711746b7f30c464b422b50e2f5 \
-    --hash=sha256:eaa912e0b11848c4d9279a93d7e2783df352b082f40111e078388701fd479e53 \
-    --hash=sha256:f35cfccb065fff93529d2afb4a2e89e363fe63ca1e4a5da22b603a85833c2649 \
-    --hash=sha256:fc0ed7fe2231a444fc219b9c42d0376e0a9a1a72f16c5cfa0f68d19f1a0663e8
     # via -r requirements.in
 pycparser==3.0 \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
@@ -635,7 +587,6 @@ pycparser==3.0 \
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
-    # via pennylane
 rustworkx==0.18.1 \
     --hash=sha256:1ebd2441a51c68a784df8c62dc2e6f1a9f58c0eb1c2e21fd59776e08f55c0c0b \
     --hash=sha256:212d0a4b5ccec8cc8c3879dd1fd13b1e61894c708185f12eb63ae571349c4d95 \
@@ -656,7 +607,6 @@ rustworkx==0.18.1 \
     --hash=sha256:c622843757ce6afd950b6f3c45b79f0078fb8d9a66f6783b5963594d1f9073bf \
     --hash=sha256:ebd6f2e28940eb983f254f7fe92b474651ac149e1bedfdaa4272dff22551cf4a \
     --hash=sha256:f8ad39453d65c85111ba887377899d568ded6ecfb5384f3182483a23426b8f58
-    # via pennylane
 scipy==1.18.1 \
     --hash=sha256:011413b7426b75012840e35649e00fe0a2c3bae89fed433876e3a99251572efc \
     --hash=sha256:0ac49ea97594532dd44b7136094d35f5440fa06e6d9c6384a74c01764df388c5 \
@@ -719,7 +669,6 @@ scipy==1.18.1 \
     --hash=sha256:f29633129f9fa7e88a3f0fca835de2d030bfc9643f7799e1a0c46cee24d38fc7 \
     --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218 \
     --hash=sha256:fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9
-    # via pennylane
 scipy-openblas32==0.3.34.237.0 \
     --hash=sha256:2ff7947c9fb4ff2e556ed34a98596b3384d3c7ecb5b4421b5b308658f482fd00 \
     --hash=sha256:336bd9a8e544c7c6c810c58ff66dce4548a5447156d2fc11db9a133f49900002 \
@@ -734,7 +683,6 @@ scipy-openblas32==0.3.34.237.0 \
     --hash=sha256:dfd44753602426ddb253b13268ca2118434a02137ec027680daa6dc7c2d193b4 \
     --hash=sha256:e454dc4edd70e8cdd8c8da25b6a10d6a9b13e30906775e75795e86d32162ccbb \
     --hash=sha256:eb810185ce637f0d98c43822ef627a7e4bacdd6daffa997536178c66d8ecc174
-    # via pennylane-lightning
 termcolor==3.3.0 \
     --hash=sha256:348871ca648ec6a9a983a13ab626c0acce02f515b9e1983332b17af7979521c5 \
     --hash=sha256:cf642efadaf0a8ebbbf4bc7a31cec2f9b5f21a9f726f4ccbb08192c9c26f43a5
@@ -742,7 +690,6 @@ termcolor==3.3.0 \
 tomlkit==0.15.1 \
     --hash=sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304 \
     --hash=sha256:e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97
-    # via pennylane
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
@@ -750,7 +697,6 @@ typing-extensions==4.16.0 \
     #   aiosqlite
     #   anyio
     #   llama-cpp-python
-    #   pennylane
 urllib3==2.7.0 \
     --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
     --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897

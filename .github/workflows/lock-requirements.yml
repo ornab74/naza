@@ -82,7 +82,8 @@ jobs:
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DOQS_ENABLE_KEM_ML_KEM=ON \
             -DOQS_ENABLE_KEM_HQC=ON \
-            -DOQS_ENABLE_SIG_ML_DSA=ON \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            "-DOQS_MINIMAL_BUILD=KEM_ml_kem_1024;KEM_hqc_256;SIG_dilithium_2" \
             -G Ninja
 
           cmake --build /tmp/liboqs-src/build --parallel

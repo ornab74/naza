@@ -32,7 +32,7 @@ class CiSupplyChainTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("id-token: write", workflow)
         self.assertIn("attestations: write", workflow)
-        attest_at = workflow.index("uses: actions/attest@e59cbc1ad1ac2d59339667419eb8cdde6eb61e3d")
+        attest_at = workflow.index("uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8")
         sign_at = workflow.index("python /tmp/pq_sign_lock.py")
         upload_at = workflow.index("uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02")
         self.assertLess(sign_at, attest_at)
@@ -120,6 +120,16 @@ class CiSupplyChainTests(unittest.TestCase):
         self.assertIn("8#022", runner)
         self.assertIn('naza_crypto_preflight.py', runner)
         self.assertIn('export NAZA_REQUIRE_PROCESS_HARDENING=1', runner)
+
+    def test_crypto_runtime_pins_include_security_fixes_and_argon2(self):
+        repair = (Path(__file__).parents[1] / "install-native-termux-repair.sh").read_text(encoding="utf-8")
+        self.assertIn('CRYPTO_VERSION="46.0.7"', repair)
+        self.assertIn('ARGON2_VERSION="25.1.0"', repair)
+        self.assertIn('ARGON2_BINDINGS_VERSION="25.1.0"', repair)
+        preflight = (Path(__file__).parents[1] / "naza_crypto_preflight.py").read_text(encoding="utf-8")
+        self.assertIn('"cryptography": "46.0.7"', preflight)
+        self.assertIn('"argon2-cffi": "25.1.0"', preflight)
+        self.assertIn('openssl_version_text()', preflight)
 
 if __name__ == "__main__":
     unittest.main()

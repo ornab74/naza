@@ -78,10 +78,12 @@ cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DBUILD_SHARED_LIBS=ON \
+  -DOQS_BUILD_ONLY_LIB=ON \
+  '-DOQS_MINIMAL_BUILD=KEM_ml_kem_1024;KEM_hqc_256' \
   -DOQS_DIST_BUILD=ON \
   -DOQS_ENABLE_KEM_ML_KEM=ON \
   -DOQS_ENABLE_KEM_HQC=ON \
-  -DOQS_ENABLE_SIG_ML_DSA=ON
+  -DOQS_ENABLE_SIG_ML_DSA=OFF
 cmake --build build -j"$(nproc 2>/dev/null || echo 2)"
 cmake --install build
 
@@ -104,6 +106,8 @@ import oqs
 mechs = set(oqs.get_enabled_kem_mechanisms())
 required = {"ML-KEM-1024", "HQC-256"}
 missing = sorted(required - mechs)
+if mechs != required or oqs.get_enabled_sig_mechanisms():
+    raise SystemExit("ERROR: liboqs algorithm set differs from the minimal runtime policy")
 if missing:
     raise SystemExit("ERROR: required liboqs mechanisms missing: " + ", ".join(missing))
 print("SpookyNaza OQS backend ready: ML-KEM-1024 + HQC-256")

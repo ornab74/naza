@@ -84,7 +84,9 @@ OQS_HOME="$HOME/.local/liboqs-$OQS_VERSION"
 OQS_SRC="$HOME/liboqs-$OQS_VERSION"
 
 OQS_PY_VERSION="0.12.0"
-CRYPTO_VERSION="46.0.5"
+CRYPTO_VERSION="46.0.7"
+ARGON2_VERSION="25.1.0"
+ARGON2_BINDINGS_VERSION="25.1.0"
 LLAMA_VERSION="0.3.1"
 
 BACKUP_ROOT="$HOME/.naza-native-backups"
@@ -396,7 +398,9 @@ diskcache==5.6.3
 Jinja2==3.1.6
 typing-extensions==4.16.0
 
-cryptography==46.0.5
+cryptography==46.0.7
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
 cffi==2.1.1
 pycparser==3.0
 REQ
@@ -543,6 +547,26 @@ for symbol in (
 
     print("Found:", symbol)
 
+lib.OQS_KEM_alg_count.restype = ctypes.c_size_t
+lib.OQS_KEM_alg_identifier.argtypes = [ctypes.c_size_t]
+lib.OQS_KEM_alg_identifier.restype = ctypes.c_char_p
+lib.OQS_KEM_alg_is_enabled.argtypes = [ctypes.c_char_p]
+lib.OQS_KEM_alg_is_enabled.restype = ctypes.c_int
+actual = set()
+for i in range(lib.OQS_KEM_alg_count()):
+    name = lib.OQS_KEM_alg_identifier(i)
+    if lib.OQS_KEM_alg_is_enabled(name):
+        actual.add(name.decode("ascii"))
+lib.OQS_SIG_alg_count.restype = ctypes.c_size_t
+lib.OQS_SIG_alg_identifier.argtypes = [ctypes.c_size_t]
+lib.OQS_SIG_alg_identifier.restype = ctypes.c_char_p
+lib.OQS_SIG_alg_is_enabled.argtypes = [ctypes.c_char_p]
+lib.OQS_SIG_alg_is_enabled.restype = ctypes.c_int
+if actual != {"ML-KEM-1024", "HQC-256"} or any(
+    lib.OQS_SIG_alg_is_enabled(lib.OQS_SIG_alg_identifier(i))
+    for i in range(lib.OQS_SIG_alg_count())
+):
+    raise SystemExit("Existing liboqs is not the minimal runtime build; rebuild required")
 print("liboqs validation: PASS")
 PY
 }
@@ -944,7 +968,7 @@ import os
 
 from cryptography import __version__
 
-if __version__ != "46.0.5":
+if __version__ != "46.0.7":
     raise SystemExit(1)
 
 if "libpython" in os.environ.get("LD_PRELOAD", ""):
@@ -992,6 +1016,8 @@ if [ "$CRYPTO_WORKING" -eq 0 ]; then
     "$PYTHON_BIN" -m pip install \
         --force-reinstall \
         "cryptography==$CRYPTO_VERSION" \
+        "argon2-cffi==$ARGON2_VERSION" \
+        "argon2-cffi-bindings==$ARGON2_BINDINGS_VERSION" \
         "cffi==2.1.1" \
         "pycparser==3.0"
 
@@ -1009,7 +1035,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 print("cryptography:", __version__)
 
-if __version__ != "46.0.5":
+if __version__ != "46.0.7":
     raise SystemExit(
         "Wrong cryptography version"
     )
@@ -2278,7 +2304,7 @@ llama-cpp-python:
   Android support repaired/validated
 
 cryptography:
-  46.0.5
+  46.0.7
   Android import/AES-GCM validated
   No libpython preload
 

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# Unified Naza TUI — same program as main.py (road + food/water).
 import os, sys, time, json, shutil, hashlib, asyncio, threading, httpx, aiosqlite, getpass, math, random, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +12,7 @@ import hmac
 import secrets
 import stat as statmod
 import ctypes
+from argon2.low_level import ARGON2_VERSION, Type as Argon2Type, hash_secret_raw
 from llama_cpp import Llama
 import spooky_trihybrid as tri
 import naza_storage as storage
@@ -32,7 +31,6 @@ try:
 except Exception:
     pass
 
-# Reduce same-UID inspection of live key/token material where Linux permits it.
 _PROCESS_NONDUMPABLE = False
 PR_GET_DUMPABLE = 3
 PR_SET_DUMPABLE = 4
@@ -56,9 +54,6 @@ if os.environ.get("NAZA_REQUIRE_PROCESS_HARDENING") == "1":
         raise RuntimeError("Could not enforce non-dumpable process policy")
     if not _PROCESS_NO_NEW_PRIVS:
         raise RuntimeError("Could not enforce no-new-privileges process policy")
-
-# No psutil / pennylane. Metrics come from /proc and /sys (Ubuntu-proof).
-# Entropic score uses an in-house 2-qubit statevector (stdlib only).
 
 MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
 MODEL_FILE = "llama3-small-Q3_K_M.gguf"
@@ -98,7 +93,7 @@ def boxed(title: str, lines: List[str], width: int = 72):
     return "\n".join([top, title_line] + body + [bot])
 
 def drain_stdin():
-    """Drop leftover keystrokes so a prior Enter cannot pick the next menu item."""
+
     try:
         import termios, tty, fcntl
         fd = sys.stdin.fileno()
@@ -172,6 +167,10 @@ def sha256_file(path: Path) -> str:
 KEY_MAGIC = b"NKEY2"
 KEY_MAGIC3 = b"NKEY3"
 KEY_KDF_ROUNDS = 400_000
+NKEY4_VERSION = 2
+NKEY4_ARGON2_TIME = 3
+NKEY4_ARGON2_MEMORY_KIB = 64 * 1024
+NKEY4_ARGON2_PARALLELISM = 1
 MIN_NEW_PASSPHRASE_LENGTH = 12
 KEY_FLAG_PASSPHRASE = 0x01
 LOCK_PATH = Path("naza.lock.json")
@@ -188,15 +187,14 @@ if DEFAULT_CRYPTO_MODE not in ("tri", "classical"):
     DEFAULT_CRYPTO_MODE = "tri"
 
 OQS_INSTALL_SCRIPT = r'''#!/usr/bin/env bash
-# Naza/SpookyNaza pinned Open Quantum Safe backend installer.
-# Downloads are cryptographically verified before extraction or installation.
+
 set -euo pipefail
 
 LIBOQS_VER="0.14.0"
 LIBOQS_URL="https://github.com/open-quantum-safe/liboqs/archive/refs/tags/${LIBOQS_VER}.tar.gz"
 LIBOQS_SHA256="5b0df6138763b3fc4e385d58dbb2ee7c7c508a64a413d76a917529e3a9a207ea"
 
-# Pin the Python wrapper to an exact upstream commit and exact archive digest.
+
 LIBOQS_PY_REF="7906e7879a099fa34217035957d977314f99757d"
 LIBOQS_PY_URL="https://github.com/open-quantum-safe/liboqs-python/archive/${LIBOQS_PY_REF}.tar.gz"
 LIBOQS_PY_SHA256="ed785fee58e43f20c042db97389ce63091b331278c24f63828c4b8dac0905f8c"
@@ -258,7 +256,6 @@ curl --fail --show-error --location --proto '=https' --tlsv1.2 \
   "$LIBOQS_URL" -o "$OQS_TARBALL"
 verify_sha256 "$OQS_TARBALL" "$LIBOQS_SHA256" "liboqs ${LIBOQS_VER} archive"
 
-# Extraction only happens after the digest has matched.
 rm -rf "liboqs-${LIBOQS_VER}"
 tar -xzf "$OQS_TARBALL"
 cd "liboqs-${LIBOQS_VER}"
@@ -288,7 +285,7 @@ verify_sha256 "$PY_TARBALL" "$LIBOQS_PY_SHA256" "liboqs-python ${LIBOQS_PY_REF} 
 export OQS_INSTALL_PATH="$PREFIX"
 export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# Deliberately no --user: when Naza's venv is active, install into that venv.
+
 "$PYTHON_BIN" -m pip install --no-deps --force-reinstall "$PY_TARBALL"
 
 printf '
@@ -419,10 +416,6 @@ def _read_first(path: str, n: int = 256) -> str:
 
 
 def hardware_fingerprint() -> bytes:
-    """
-    Bind the wrapping key to this machine. Uses kernel/DMI IDs only —
-    no extra packages. Missing files just drop out of the mix.
-    """
     parts = []
     for p in (
         "/etc/machine-id",
@@ -458,7 +451,7 @@ def hardware_fingerprint() -> bytes:
 
 _OQS = None
 try:
-    import oqs as _OQS  # optional liboqs-python; ML-KEM-1024 when present
+    import oqs as _OQS
 except Exception:
     _OQS = None
 
@@ -473,7 +466,7 @@ def _pq_available() -> bool:
 
 
 def _pq_encapsulate(data_key: bytes) -> Tuple[bytes, bytes]:
-    """Return (kem_public, ciphertext) encapsulating data_key, or empty pair."""
+
     if not _pq_available():
         return b"", b""
     try:
@@ -481,7 +474,6 @@ def _pq_encapsulate(data_key: bytes) -> Tuple[bytes, bytes]:
             pub = kem.generate_keypair()
             ct, ss = kem.encap_secret(pub)
             wrap = AESGCM(_hkdf_sha512(ss, b"pq-salt", b"naza-mlkem-wrap", 32)).encrypt(os.urandom(12), data_key, pub)
-            # store pub || nonce+ct-of-key as one blob; caller prefixes lengths
             return pub, wrap
     except Exception:
         return b"", b""
@@ -533,18 +525,57 @@ def _wrap_aad() -> bytes:
 
 
 def _hybrid_kek(salt: bytes, passphrase: Optional[str] = None, lane: bytes = b"A") -> bytes:
-    """Two-lane HKDF so wrap and MAC never share one expanded key."""
+
     seed = derive_kek(salt, passphrase)
     hw = hardware_fingerprint()
     return _hkdf_sha512(seed + hw + RAINBOW_BIND, salt, b"naza-hybrid-aes-v1|" + lane + b"|" + hw[:32], 32)
+
+
+def _argon2_lane(secret: bytes, salt: bytes, label: bytes) -> bytes:
+    lane_salt = hashlib.sha256(b"NAZA-NKEY4-V2-SALT\x00" + label + salt).digest()[:16]
+    return hash_secret_raw(
+        secret=secret,
+        salt=lane_salt,
+        time_cost=NKEY4_ARGON2_TIME,
+        memory_cost=NKEY4_ARGON2_MEMORY_KIB,
+        parallelism=NKEY4_ARGON2_PARALLELISM,
+        hash_len=32,
+        type=Argon2Type.ID,
+        version=ARGON2_VERSION,
+    )
+
+
+def _nkey4_protector(salt: bytes, passphrase: Optional[str], version: int) -> bytes:
+
+    if not isinstance(salt, bytes) or len(salt) != 16:
+        raise ValueError("NKEY4 salt must be 16 bytes")
+    if version == 1:
+        return _hybrid_kek(salt, passphrase or None, b"TRI")
+    if version != NKEY4_VERSION:
+        raise ValueError("unsupported NKEY4 version")
+    device_secret = hardware_fingerprint()
+    if passphrase is not None and (not isinstance(passphrase, str) or not passphrase):
+        raise ValueError("NKEY4 gate secret must be non-empty")
+    gate_secret = passphrase.encode("utf-8") if passphrase else (
+        b"machine-only\x00" + device_secret
+    )
+    gate_lane = _argon2_lane(gate_secret, salt, b"gate")
+    device_lane = _argon2_lane(device_secret, salt, b"device")
+    return _hkdf_sha512(
+        gate_lane + device_lane,
+        salt,
+        b"naza/nkey4/v2/argon2id-dual-lane/tri-protector|" + RAINBOW_BIND,
+        32,
+    )
 
 
 def build_trihybrid_key(data_key: bytes, passphrase: Optional[str] = None) -> bytes:
     if not isinstance(data_key, bytes) or len(data_key) != 32:
         raise ValueError("Data key must be exactly 32 bytes")
     salt = os.urandom(16)
-    header = b"NKEY4" + bytes([1, KEY_FLAG_PASSPHRASE if passphrase else 0]) + salt
-    protector = _hybrid_kek(salt, passphrase, b"TRI")
+    flags = KEY_FLAG_PASSPHRASE if passphrase else 0
+    header = b"NKEY4" + bytes([NKEY4_VERSION, flags]) + salt
+    protector = _nkey4_protector(salt, passphrase, NKEY4_VERSION)
     envelope = tri.create_envelope(data_key, protector, _OQS, header)
     if not hmac.compare_digest(tri.open_envelope(envelope, protector, _OQS, header), data_key):
         raise ValueError("tri-hybrid verification failed")
@@ -610,7 +641,7 @@ def save_wrapped_key(data_key: bytes, passphrase: Optional[str] = None, mode: Op
 
 
 def _unwrap_nkey3(blob: bytes, passphrase: Optional[str] = None) -> bytes:
-    # NKEY3 | ver flags salt nonce ed_pub x_pub ct | ed25519_sig
+
     if not blob.startswith(KEY_MAGIC3) or len(blob) < 5 + 2 + 16 + 12 + 32 + 32 + 16 + 64:
         raise ValueError("short nkey3")
     core = blob[:291]
@@ -703,16 +734,20 @@ def load_data_key(passphrase: Optional[str] = None) -> bytes:
     blob = storage.read_private(KEY_PATH, 1024 * 1024)
     if blob.startswith(b"NKEY4"):
         try:
-            if len(blob) > tri.MAX_ENVELOPE + 23 or blob[5:6] != b"\x01" or blob[6] not in (0, KEY_FLAG_PASSPHRASE):
+            if len(blob) > tri.MAX_ENVELOPE + 23 or blob[5] not in (1, NKEY4_VERSION) or blob[6] not in (0, KEY_FLAG_PASSPHRASE):
                 raise ValueError("invalid NKEY4 header")
             need_pw = bool(blob[6] & KEY_FLAG_PASSPHRASE)
             if need_pw and not passphrase:
                 passphrase = getpass.getpass("Key passphrase: ")
             _pw_guard()
-            protector = _hybrid_kek(blob[7:23], passphrase if need_pw else None, b"TRI")
+            protector = _nkey4_protector(blob[7:23], passphrase if need_pw else None, blob[5])
             key = tri.open_envelope(blob[23:], protector, _OQS, blob[:23])
             if len(key) != 32:
                 raise ValueError("invalid data key")
+            if blob[5] == 1:
+                _atomic_write_private(KEY_PATH, build_trihybrid_key(
+                    key, passphrase if need_pw else None
+                ))
             _pw_ok()
             return key
         except Exception:
@@ -724,7 +759,6 @@ def load_data_key(passphrase: Optional[str] = None) -> bytes:
         return _unwrap_nkey2(blob, passphrase)
     if len(blob) not in (32, 48) or blob.startswith((b"NKEY", b"SPK")):
         raise ValueError("unknown or damaged key format")
-    # legacy raw / salt+raw — wrap it on first successful load
     if len(blob) >= 48:
         key = blob[16:48]
     else:
@@ -750,7 +784,7 @@ _UNLOCK_FD_REQUIRED = "NAZA_UNLOCK_FD" in os.environ
 
 
 def _read_unlock_fd() -> Optional[str]:
-    """Consume the inherited unlock descriptor once; never use it as stdin."""
+
     global _UNLOCK_FD_READ, _UNLOCK_FD_TOKEN
     if _UNLOCK_FD_READ:
         return _UNLOCK_FD_TOKEN
@@ -815,8 +849,6 @@ def consume_unlock_token():
         if p is None:
             continue
         try:
-            # unlink() removes a symlink itself and never follows it. Do not open
-            # or overwrite a path that may have changed since validation.
             if os.path.lexists(str(p)):
                 p.unlink()
         except Exception:
@@ -860,14 +892,14 @@ def ensure_key_interactive() -> bytes:
             print("No fresh unlock token. In Termux (not proot) run: bash naza_unlock.sh")
             raise
     print("No wrapped key on disk.")
-    print("  1) Machine-bound random key (no gate)")
+    print("  1) Machine-bound hardware key (no interactive gate)")
     print("  2) Typed passphrase gate")
     print("  3) Termux fingerprint + keystore token gate (no typing in proot)")
     opt = input("Choose (1/2/3): ").strip()
     key = AESGCM.generate_key(256)
     if opt == "1":
         save_wrapped_key(key, None)
-        print("Saved hardware-wrapped key without an additional gate.")
+        print("Saved Argon2id hardware-bound key without an interactive gate.")
     elif opt == "2":
         pw = getpass.getpass("Enter passphrase: ")
         pw2 = getpass.getpass("Confirm: ")
@@ -891,7 +923,7 @@ def ensure_key_interactive() -> bytes:
     return key
 
 def verify_model_integrity(path: Path, expected_sha: str = EXPECTED_HASH) -> str:
-    """Fail closed unless *path* exactly matches the pinned model digest."""
+ 
     if not path.exists():
         raise FileNotFoundError(f"model not found: {path}")
     if _is_symlink(path):
@@ -938,7 +970,6 @@ def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None,
         if expected_sha and not hmac.compare_digest(sha.lower(), expected_sha.lower()):
             raise ValueError(f"model SHA256 mismatch: expected {expected_sha}, got {sha}")
 
-        # Promote into the trusted model path only after integrity succeeds.
         os.replace(str(tmp), str(dest))
         _chmod_private(dest)
         if expected_sha:
@@ -1042,7 +1073,6 @@ async def fetch_history(key: bytes, limit:int=20, offset:int=0, search:Optional[
         secure_unlink(dec)
 
 def load_llama_model_blocking(model_path: Path) -> Llama:
-    # Defense in depth: no plaintext model reaches llama_cpp without matching the pin.
     verify_model_integrity(model_path)
     return Llama(model_path=str(model_path), n_ctx=2048, n_threads=4)
 
@@ -1070,7 +1100,7 @@ def _nproc() -> int:
 
 
 def _read_proc_stat():
-    """Return (total, idle_plus_iowait) from the aggregate cpu line in /proc/stat."""
+
     raw = _read_text("/proc/stat")
     if not raw:
         return None
@@ -1092,7 +1122,7 @@ def _read_proc_stat():
 
 
 def _cpu_percent_from_proc(sample_interval=0.15):
-    """Idle-excluded usage via two /proc/stat samples (same method as top/htop)."""
+
     t1 = _read_proc_stat()
     if not t1:
         return None
@@ -1108,7 +1138,7 @@ def _cpu_percent_from_proc(sample_interval=0.15):
 
 
 def _cpu_from_uptime():
-    """Lifetime busy fraction from /proc/uptime: 1 - idle/(uptime*nproc)."""
+
     raw = _read_text("/proc/uptime")
     if not raw:
         return None
@@ -1130,12 +1160,11 @@ def _cpu_from_load():
 
 
 def _psi_cpu_some() -> Optional[float]:
-    """Linux PSI: fraction of time some task was stalled on CPU. Ubuntu 4.20+."""
+
     raw = _read_text("/proc/pressure/cpu")
     if not raw:
         return None
     try:
-        # some avg10=0.12 avg60=... avg300=... total=...
         for line in raw.splitlines():
             if line.startswith("some"):
                 for tok in line.split():
@@ -1147,7 +1176,7 @@ def _psi_cpu_some() -> Optional[float]:
 
 
 def _mem_from_proc():
-    """Used fraction from MemAvailable / MemTotal (what free(1) uses on Ubuntu)."""
+
     raw = _read_text("/proc/meminfo")
     if not raw:
         return None
@@ -1170,7 +1199,7 @@ def _mem_from_proc():
 
 
 def _load1_from_proc():
-    """1-min loadavg / nproc, plus runnable/total threads from /proc/loadavg."""
+
     raw = _read_text("/proc/loadavg")
     if not raw:
         return None
@@ -1183,7 +1212,7 @@ def _load1_from_proc():
 
 
 def _proc_count_from_proc():
-    """Normalize running process count. Prefer loadavg field 4 (runnable/total)."""
+
     raw = _read_text("/proc/loadavg")
     total_tasks = None
     if raw:
@@ -1197,7 +1226,6 @@ def _proc_count_from_proc():
             total_tasks = sum(1 for name in os.listdir("/proc") if name.isdigit())
         except Exception:
             return None
-    # Soft cap: 400 tasks ~ busy desktop/server; clamp to 1.0
     return max(0.0, min(1.0, total_tasks / 400.0))
 
 
@@ -1210,13 +1238,7 @@ def _milli_to_c(raw: str) -> Optional[float]:
 
 
 def _read_temperature():
-    """
-    Ubuntu-proof temp:
-      1) thermal_zone type x86_pkg_temp / cpu-thermal / soc_thermal
-      2) any /sys/class/thermal/thermal_zone*/temp
-      3) hwmon temp*_input
-    Normalize 20C..90C -> 0..1.
-    """
+
     preferred_types = (
         "x86_pkg_temp", "cpu-thermal", "soc_thermal", "acpitz",
         "cpu", "k10temp", "coretemp",
@@ -1266,11 +1288,6 @@ def _read_temperature():
 
 
 def collect_system_metrics() -> Dict[str, float]:
-    """
-    Ubuntu-native metrics from /proc and /sys only (no psutil).
-    Keys: cpu, mem, load1, temp, proc  — all in [0, 1].
-    Soft-fills missing sensors. Does not stop the scanner.
-    """
     cpu = _cpu_percent_from_proc()
     if cpu is None:
         cpu = _psi_cpu_some()
@@ -1287,7 +1304,6 @@ def collect_system_metrics() -> Dict[str, float]:
     proc = _proc_count_from_proc()
     temp = _read_temperature()
 
-    # Never abort the scanner. Fill gaps with quiet defaults.
     defaults = {"cpu": 0.12, "mem": 0.20, "load1": 0.10, "proc": 0.08, "temp": 0.25}
     if cpu is None:
         cpu = defaults["cpu"]
@@ -1309,11 +1325,6 @@ def collect_system_metrics() -> Dict[str, float]:
     }
 
 
-# ---------------------------------------------------------------------------
-# System wobble announcer — live host only. No decoy / shadow mix.
-# Fast window = last 3 samples, slow window = full ring.
-# Leader = metric with largest |delta|. Phase = atan2(cpu-mem, load-temp).
-# ---------------------------------------------------------------------------
 _WOBBLE_HIST: List[Tuple[float, Dict[str, float]]] = []
 _WOBBLE_MAX = 12
 _WOBBLE_WORDS = ("still", "drift", "swell", "chop", "surge", "break")
@@ -1321,6 +1332,7 @@ _WOBBLE_LEADERS = ("cpu", "mem", "load1", "temp", "proc")
 
 
 def measure_wobble(metrics: dict) -> dict:
+
     now = time.time()
     keys = ("cpu", "mem", "load1", "temp", "proc")
     snap = {k: float(metrics.get(k, 0.0)) for k in keys}
@@ -1341,7 +1353,6 @@ def measure_wobble(metrics: dict) -> dict:
 
     fast = _clamp01(_rms_speed(_WOBBLE_HIST[-3:]) * 0.40)
     slow = _clamp01(_rms_speed(_WOBBLE_HIST) * 0.28)
-    # acceleration: fast vs slow
     jerk = _clamp01(abs(fast - slow) * 1.4)
 
     flips = 0
@@ -1359,7 +1370,6 @@ def measure_wobble(metrics: dict) -> dict:
     den = math.sqrt(sum(last[k] ** 2 for k in keys) * sum(mean[k] ** 2 for k in keys)) or 1.0
     coh = _clamp01((num / den + 1.0) * 0.5)
 
-    # per-metric travel this window
     travel = {}
     if n >= 2:
         first = _WOBBLE_HIST[0][1]
@@ -1367,7 +1377,6 @@ def measure_wobble(metrics: dict) -> dict:
     else:
         travel = {k: 0.0 for k in keys}
     leader = max(keys, key=lambda k: travel[k])
-    # live phase from the metric plane (not a hash)
     phase = (math.atan2(last["cpu"] - last["mem"], last["load1"] - last["temp"] + 1e-9) / (2.0 * math.pi)) % 1.0
 
     amp = _clamp01(0.55 * fast + 0.30 * slow + 0.15 * jerk)
@@ -1401,24 +1410,17 @@ def wobble_announce(w: dict) -> str:
         f"rate={w['rate']:.2f} coh={w['coh']:.2f} phase={w['phase']:.2f}"
     )
 
-# ---------------------------------------------------------------------------
-# In-house 5-qubit statevector (stdlib complex only). No PennyLane / NumPy.
-# Layout: q0=cpu, q1=mem, q2=load1, q3=temp, q4=proc
-# Layers: feature RX/RY/RZ, ring CX entanglement, mixing RX, second CX ring.
-# Observables: <Z_i>, pairwise <Z_i Z_j>, von Neumann entropy of q0+q1 cut.
-# ---------------------------------------------------------------------------
-
 def _c(re: float, im: float = 0.0) -> complex:
     return complex(re, im)
 
 
 def _kron2(a, b):
-    """Kronecker product of two 2x2 matrices as 4 nested lists? We apply gates in-place on 32-amp vector."""
-    return a  # unused; kept for readability of comments
+    
+    return a 
 
 
 def _apply_1q(state, n, q, u00, u01, u10, u11):
-    """Apply 2x2 unitary on qubit q of an n-qubit statevector (little-endian)."""
+
     dim = 1 << n
     bit = 1 << q
     for i in range(dim):
@@ -1443,7 +1445,6 @@ def _ry(state, n, q, theta):
 
 
 def _rz(state, n, q, theta):
-    # diag(e^{-iθ/2}, e^{iθ/2})
     ph = theta / 2.0
     e_m = complex(math.cos(-ph), math.sin(-ph))
     e_p = complex(math.cos(ph), math.sin(ph))
@@ -1500,8 +1501,7 @@ def _exp_zz(state, n, q, r) -> float:
 
 
 def _entropy_cut01(state, n) -> float:
-    """Von Neumann entropy of qubits 0+1 (4x4 reduced density, n=5 => 8 env amps)."""
-    # rho_ab[i,j] = sum_k psi_{i|k} conj(psi_{j|k}) where i,j in 0..3 and k is q2..q{n-1}
+
     env = 1 << (n - 2)
     rho = [[0j] * 4 for _ in range(4)]
     for ab in range(4):
@@ -1512,11 +1512,7 @@ def _entropy_cut01(state, n) -> float:
                 ib = cd | (k << 2)
                 s += state[ia] * state[ib].conjugate()
             rho[ab][cd] = s
-    # Hermitian 4x4 eigenvalues via characteristic polynomial is messy;
-    # use power-iter-free Jacobi-ish: 2-qubit rho is small — QR-free trace powers + Newton.
-    # Compute eigenvalues of 4x4 Hermitian with a few Jacobi sweeps.
     a = [[rho[i][j] for j in range(4)] for i in range(4)]
-    # force Hermitian
     for i in range(4):
         a[i][i] = complex(a[i][i].real, 0.0)
         for j in range(i + 1, 4):
@@ -1536,7 +1532,6 @@ def _entropy_cut01(state, n) -> float:
                 c = 1.0 / math.sqrt(1.0 + t * t)
                 s = t * c
                 phase = apq / abs(apq) if abs(apq) else 1+0j
-                # rotate
                 for k in range(4):
                     aik, aiq = a[k][p], a[k][q]
                     a[k][p] = c * aik - s * phase.conjugate() * aiq
@@ -1552,12 +1547,9 @@ def _entropy_cut01(state, n) -> float:
     for e in eigs:
         if e > 1e-12:
             ent -= e * math.log(e)
-    # max entropy for 2 qubits is ln(4) ≈ 1.386
     return max(0.0, min(1.0, ent / math.log(4.0)))
 
 
-# Rainbow bands: wavelength-style HSV wheel synced from live metrics.
-# 12 named bands around the hue circle; each metric owns a hue offset.
 BAND_NAMES = (
     "infra", "crimson", "vermilion", "amber", "gold", "chartreuse",
     "viridian", "teal", "azure", "cobalt", "violet", "ultraviolet",
@@ -1566,7 +1558,17 @@ BAND_COUNT = len(BAND_NAMES)
 
 
 def _clamp01(x: float) -> float:
+    x = float(x)
+    if not math.isfinite(x):
+        raise ValueError("circuit metrics must be finite")
     return float(max(0.0, min(1.0, x)))
+
+
+def _circuit_metrics(metrics: dict) -> dict:
+    if not isinstance(metrics, dict):
+        raise TypeError("circuit metrics must be a mapping")
+    return {name: _clamp01(metrics.get(name, 0.0))
+            for name in ("cpu", "mem", "load1", "temp", "proc")}
 
 
 def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[float, float, float]:
@@ -1592,17 +1594,10 @@ def _wrap_dist(a: float, b: float) -> float:
 
 
 def metrics_to_rainbow(metrics: dict) -> dict:
-    """
-    Spectral color-sync.
-    Each metric paints a Gaussian onto a 12-bin hue wheel. The bins are a
-    power spectrum, not a single locked color. Centroid of that spectrum is
-    the display hue; width is saturation; peak/mean is lock.
-    """
-    cpu = _clamp01(metrics.get("cpu", 0.0))
-    mem = _clamp01(metrics.get("mem", 0.0))
-    load1 = _clamp01(metrics.get("load1", 0.0))
-    temp = _clamp01(metrics.get("temp", 0.0))
-    proc = _clamp01(metrics.get("proc", 0.0))
+
+    metrics = _circuit_metrics(metrics)
+    cpu, mem, load1, temp, proc = (metrics[name] for name in
+                                    ("cpu", "mem", "load1", "temp", "proc"))
     channels = {
         "cpu":   (cpu,   0.00, 0.070),
         "mem":   (mem,   0.18, 0.065),
@@ -1626,21 +1621,18 @@ def metrics_to_rainbow(metrics: dict) -> dict:
             spectrum[i] += mag * math.exp(-0.5 * (d / sigma) ** 2)
     ssum = sum(spectrum) or 1.0
     spectrum = [x / ssum for x in spectrum]
-    # spectral moments
     cx = cy = 0.0
     for i, p in enumerate(spectrum):
         ang = 2.0 * math.pi * ((i + 0.5) / BAND_COUNT)
         cx += p * math.cos(ang)
         cy += p * math.sin(ang)
     hue = (math.atan2(cy, cx) / (2.0 * math.pi)) % 1.0
-    # circular spread ~ 0 when all mass is one bin
     R = math.hypot(cx, cy)
     spread = _clamp01(1.0 - R)
     peak = max(spectrum)
     mean_p = 1.0 / BAND_COUNT
     lock = _clamp01((peak - mean_p) / (1.0 - mean_p))
     stress = (cpu + mem + load1 + temp + proc) / 5.0
-    # harmonic roughness: adjacent-bin contrast
     rough = 0.0
     for i in range(BAND_COUNT):
         rough += abs(spectrum[i] - spectrum[(i + 1) % BAND_COUNT])
@@ -1657,17 +1649,14 @@ def metrics_to_rainbow(metrics: dict) -> dict:
         BAND_NAMES[band_idx],
         BAND_NAMES[(band_idx + 1) % BAND_COUNT],
     )
-    # warm/cool energy split for circuit bias
     warm = sum(spectrum[i] for i in range(0, 6))
     cool = 1.0 - warm
     wob = measure_wobble(metrics)
-    # Wobble shears the spectrum along the leader metric's hue — no decoy pool.
     leader_h = channel_hues.get(wob["leader"], hue)
     if wob["amp"] > 0.04:
         shifted = [0.0] * BAND_COUNT
         shift = int(round(wob["phase"] * wob["amp"] * 2.0)) % BAND_COUNT
         for i, p in enumerate(spectrum):
-            # pull a little mass toward the leader's band
             li = int(leader_h * BAND_COUNT) % BAND_COUNT
             dest = (i + shift) % BAND_COUNT
             pulled = p * (0.18 * wob["amp"])
@@ -1716,11 +1705,8 @@ def rainbow_prompt_line(sync: dict) -> str:
 
 
 def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
-    """
-    Spectral band circuit.
-    12-bin spectrum gates three Trotter layers. Each layer uses a different
-    topology weighted by that layer's band energy (warm / peak / cool).
-    """
+ 
+    metrics = _circuit_metrics(metrics)
     sync = metrics_to_rainbow(metrics)
     feats = [
         float(metrics.get("cpu", 0.0)),
@@ -1749,7 +1735,6 @@ def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
         [(0, 1), (0, 2), (1, 3), (2, 4), (3, 4)],
     )
 
-    # layer 0 — feature + spectral phase kick
     for q, x in enumerate(feats):
         _h(state, n, q)
         _ry(state, n, q, x * math.pi * (0.7 + 0.3 * spec[q % BAND_COUNT]))
@@ -1760,7 +1745,6 @@ def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
         seq = list(reversed(pairs)) if reverse else pairs
         for a, c in seq:
             _cx(state, n, a, c)
-            # analog of RZZ: CX-RZ-CX already implied; extra CZ when cool/warm flips
             if energy > 0.12:
                 _cz(state, n, a, c)
         for q, x in enumerate(feats):
@@ -1770,29 +1754,29 @@ def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
             _ry(state, n, q, (abs(x - y) * tint_g + frac * energy) * math.pi)
             _rz(state, n, q, tint_b * val * energy * math.pi)
 
-    # three Trotter slices: warm bands, peak band, cool bands
     _layer(topologies[band % 6], warm * (0.6 + 0.4 * lock), r, g, bcol, reverse=False)
     _layer(topologies[(band + 2) % 6], spec[band] * (0.5 + 0.5 * sat), g, bcol, r, reverse=True)
     _layer(topologies[(band + 4) % 6], cool * (0.5 + 0.5 * spread), bcol, r, g, reverse=False)
 
-    # roughness injects a diagonal phase grating (beats between adjacent bands)
     if rough > 0.05:
         for q in range(n):
             _rz(state, n, q, rough * (q + 1) * math.pi / n)
 
-    # wobble announcer: phase kick + extra CX on a seed-chosen pair
     wob = sync.get("wobble") or measure_wobble(metrics)
     lead_q = {"cpu": 0, "mem": 1, "load1": 2, "temp": 3, "proc": 4}.get(wob["leader"], 0)
     for q in range(n):
         _rz(state, n, q, wob["phase"] * 2.0 * math.pi * (0.25 + 0.75 * wob["slow"]))
         _rx(state, n, q, wob["fast"] * math.pi * 0.30)
         _ry(state, n, q, wob["jerk"] * math.pi * 0.20)
-    # leader qubit broadcasts to the others (star, no extra pool)
     for t in range(n):
         if t != lead_q:
             _cx(state, n, lead_q, t)
             if wob["level"] >= 3:
                 _cz(state, n, lead_q, t)
+
+    norm = sum(amp.real * amp.real + amp.imag * amp.imag for amp in state)
+    if not math.isfinite(norm) or abs(norm - 1.0) > 1e-9:
+        raise RuntimeError("circuit state normalization check failed")
 
     topology = band % 6
 
@@ -1803,16 +1787,23 @@ def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
             zzs.append(_exp_zz(state, n, i, j))
     cut_s = _entropy_cut01(state, n)
 
-    # Map <Z> in [-1,1] to excitation 0..1
     excite = [(1.0 - z) * 0.5 for z in zs]
-    # Coupling energy: more anti-aligned ZZ => more "tension"
     tension = sum((1.0 - zz) * 0.5 for zz in zzs) / max(1, len(zzs))
-    # Weighted system stress
     w = [0.28, 0.22, 0.20, 0.16, 0.14]
     stress = sum(wi * ei for wi, ei in zip(w, excite))
     raw = 0.45 * stress + 0.25 * tension + 0.30 * cut_s
     score = 1.0 / (1.0 + math.exp(-8.0 * (raw - 0.42)))
     score = float(max(0.0, min(1.0, score)))
+    if not all(math.isfinite(x) for x in zs + zzs + [cut_s, tension, raw, score]):
+        raise RuntimeError("circuit produced a non-finite observable")
+    transcript = json.dumps(
+        {"v": 1, "metrics": metrics, "band": band, "topology": topology,
+         "z": [round(x, 12) for x in zs], "zz": [round(x, 12) for x in zzs],
+         "entropy": round(cut_s, 12), "score": round(score, 12)},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("ascii")
+    circuit_digest = hashlib.sha256(b"NAZA-CIRCUIT-V1\x00" + transcript).hexdigest()
+    sync["circuit_digest"] = circuit_digest
     detail = {
         "z": zs,
         "excite": excite,
@@ -1823,12 +1814,13 @@ def house_entropic_score(metrics: dict) -> Tuple[float, dict]:
         "sync": sync,
         "topology": topology,
         "band": sync["band_name"],
+        "circuit_digest": circuit_digest,
     }
     return score, detail
 
 
 def pennylane_entropic_score(rgb_or_metrics, shots: int = 256) -> float:
-    """Back-compat wrapper. Accepts metrics dict or leftover (r,g,b) tuple."""
+
     if isinstance(rgb_or_metrics, dict):
         s, _ = house_entropic_score(rgb_or_metrics)
         return s
@@ -1843,6 +1835,7 @@ def entropic_to_modifier(score: float) -> float:
 def seal_scan(label: str, prompt: str, sync: Optional[dict], key: bytes) -> str:
     lock = ""
     wob = ""
+    circuit = ""
     if sync:
         raw_lock = sync.get("lock")
         if isinstance(raw_lock, (list, tuple)):
@@ -1851,13 +1844,18 @@ def seal_scan(label: str, prompt: str, sync: Optional[dict], key: bytes) -> str:
             lock = "{:.3f}".format(float(raw_lock))
         w = sync.get("wobble") or {}
         wob = "{}:{}".format(w.get("word", ""), w.get("leader", ""))
-    body = "|".join([label, lock, wob, hashlib.sha256((prompt or "").encode()).hexdigest()[:16]])
+        digest = str(sync.get("circuit_digest", ""))
+        if digest:
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid circuit transcript digest")
+            circuit = digest
+    body = "|".join([label, lock, wob, circuit, hashlib.sha256((prompt or "").encode()).hexdigest()[:16]])
     tag = hmac.new(_mac_key(key), body.encode(), hashlib.sha256).hexdigest()[:24]
     return "receipt {} {}".format(body, tag)
 
 
 def persist_scan_receipt(label: str, prompt: str, sync: Optional[dict], key: bytes) -> str:
-    """Atomically persist a receipt without participating in classification."""
+
     global _LAST_RECEIPT
     receipt = seal_scan(label, prompt, sync, key)
     _atomic_write_private(Path("naza.last.receipt"), (receipt + "\n").encode())
@@ -2275,12 +2273,7 @@ async def db_viewer_flow(state:dict):
         else: break
 
 def _spooky_lab_protector(salt: bytes) -> bytes:
-    """Machine-bound protector for disposable SC1 lab material only.
 
-    This protector is deliberately NOT used to wrap Naza's production data key.
-    The lab stores only random test payloads so an experimental primitive cannot
-    become a bypass around an existing NKEY3 passphrase/fingerprint gate.
-    """
     seed = derive_kek(salt, None)
     return _hkdf_sha512(
         seed + hardware_fingerprint() + RAINBOW_BIND,
@@ -2308,11 +2301,7 @@ def _spooky_lab_unpack(blob: bytes) -> Tuple[bytes, bytes, bytes]:
 
 
 def spooky_lab_flow(state: dict):
-    """Interactive research harness for SpookyCombiner-1.
 
-    Uses random canary payloads, never the live Naza data key. This preserves the
-    security boundary between experimental PQ composition and production NKEY3.
-    """
     while True:
         clear_screen(); header(state)
         st = spooky_status(_OQS)
@@ -2377,7 +2366,6 @@ def spooky_lab_flow(state: dict):
                     raise SpookyCombinerError("SC1 lab artifact authentication failed")
                 print("SC1 stored-envelope verification: PASS")
             except Exception:
-                # Keep the user-facing error deliberately branch-agnostic.
                 print("SC1 stored-envelope verification: FAIL (generic authentication failure)")
             input("Enter...")
         elif choice == "4":
@@ -2419,7 +2407,6 @@ def trihybrid_flow(state: dict):
         input("Enter...")
         return
     pw = read_unlock_token()
-    # Authenticate the on-disk key before replacing its envelope; retain its gate.
     current = storage.read_private(KEY_PATH, 1024 * 1024)
     if current.startswith((b"NKEY2", b"NKEY3", b"NKEY4")) and current[6] & KEY_FLAG_PASSPHRASE and not pw:
         raise ValueError("Current passphrase/token is required to preserve the gate")

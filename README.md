@@ -100,6 +100,12 @@ HKDF-SHA512
 AES-256-GCM
 ```
 
+New NKEY4 v2 envelopes use independent Argon2id lanes for the gate material and
+device fingerprint, then combine them with domain-separated HKDF-SHA512. The
+machine-only Android mode derives both separated lanes from hardware identity;
+passphrase and Android Keystore modes add their gate secret to the first lane.
+Existing NKEY4 v1 envelopes remain readable for migration.
+
 The native installer builds/verifies the pinned liboqs backend and checks that
 `ML-KEM-1024` and `HQC-256` are available before declaring the installation
 healthy.
@@ -132,7 +138,7 @@ The recovered reconciliation installer handles the Android stack, including:
 - liboqs-python 0.12.0
 - ML-KEM-1024 / HQC-256 verification
 - llama-cpp-python 0.3.1 plus recovered Android loader patch
-- cryptography 46.0.5
+- cryptography 46.0.7
 - X25519 / AES-256-GCM verification
 - Android Keystore Gate 3 setup
 - Python and shell syntax validation

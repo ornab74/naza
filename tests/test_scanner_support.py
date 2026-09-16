@@ -12,11 +12,11 @@ MAIN = Path(__file__).resolve().parents[1] / "main.py"
 
 def support_scope():
     tree = ast.parse(MAIN.read_text(encoding="utf-8"))
-    names = {"seal_scan", "_simple_tokenize", "punkd_analyze", "punkd_apply", "chunked_generate"}
+    names = {"seal_scan", "_clamp01", "_circuit_metrics", "_simple_tokenize", "punkd_analyze", "punkd_apply", "chunked_generate"}
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     scope = dict(re=re, hashlib=hashlib, hmac=hmac, List=List, Dict=Dict,
                  Tuple=Tuple, Optional=Optional, Callable=Callable, Llama=object,
-                 _mac_key=lambda key: key)
+                 math=__import__('math'), _mac_key=lambda key: key)
     exec(compile(ast.Module(body=body, type_ignores=[]), "main.py", "exec"), scope)
     return scope
 
@@ -39,6 +39,20 @@ class ScannerSupportTests(unittest.TestCase):
             b"k" * 32,
         )
         self.assertIn("High|0.625|surge:temp|", receipt)
+
+    def test_circuit_rejects_non_finite_metrics_and_bad_transcript(self):
+        scope = support_scope()
+        with self.assertRaisesRegex(ValueError, "finite"):
+            scope["_circuit_metrics"]({"cpu": float("nan")})
+        with self.assertRaisesRegex(ValueError, "transcript"):
+            scope["seal_scan"]("High", "prompt", {"circuit_digest": "forged"}, b"k" * 32)
+
+    def test_receipt_binds_complete_circuit_digest(self):
+        digest = "a" * 64
+        receipt = support_scope()["seal_scan"](
+            "Low", "prompt", {"circuit_digest": digest}, b"k" * 32,
+        )
+        self.assertIn("|" + digest + "|", receipt)
 
     def test_non_divisible_chunk_budget_is_capped(self):
         llm = FakeLlama(["one two three four five six seven eight", "more words continue here"])

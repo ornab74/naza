@@ -45,7 +45,7 @@ python -m pip install --require-hashes -r "$APP_DIR/requirements.txt"
 
 chmod +x "$APP_DIR/install_liboqs_0.14.0.sh" "$APP_DIR/run_naza.sh"
 export PYTHON_BIN="$VENV_DIR/bin/python"
-"$APP_DIR/install_liboqs_0.14.0.sh"
+PREFIX="$HOME/.local/liboqs-0.14.0" "$APP_DIR/install_liboqs_0.14.0.sh"
 
 export OQS_INSTALL_PATH="$HOME/.local/liboqs-0.14.0"
 unset LD_PRELOAD PYTHONPATH PYTHONHOME PYTHONINSPECT PYTHONSTARTUP
@@ -53,9 +53,10 @@ export LD_LIBRARY_PATH="$OQS_INSTALL_PATH/lib"
 export NAZA_CRYPTO_MODE=tri
 "$VENV_DIR/bin/python" - <<'PY'
 import oqs
-import spooky_trihybrid
 mechs = set(oqs.get_enabled_kem_mechanisms())
 missing = {"ML-KEM-1024", "HQC-256"} - mechs
+if mechs != {"ML-KEM-1024", "HQC-256"} or oqs.get_enabled_sig_mechanisms():
+    raise SystemExit("Unexpected liboqs algorithms installed")
 if missing:
     raise SystemExit("SpookyNaza install failed; missing OQS mechanisms: " + ", ".join(sorted(missing)))
 print("SpookyNaza default verified: tri-hybrid NKEY4 + ML-KEM-1024 + HQC-256 + X25519")
