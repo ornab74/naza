@@ -1,0 +1,73 @@
+name: Package NAZA Cancer Full Project
+
+on:
+  push:
+    branches:
+      - chatgpt/cancer-full-package-20260918
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Apply cancer risk prompt only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          target = Path('main.py')
+          text = target.read_text(encoding='utf-8')
+          fn = text.find('def build_road_scanner_prompt')
+          if fn < 0:
+              raise SystemExit('build_road_scanner_prompt() not found')
+          start = text.find('    tpl = (', fn)
+          end = text.find('    return tpl', start)
+          if start < 0 or end < 0:
+              raise SystemExit('prompt block markers not found')
+
+          replacement = Path('.chatgpt/cancer_prompt_block.txt').read_text(encoding='utf-8')
+          target.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
+          py_compile.compile(str(target), doraise=True)
+          PY
+
+      - name: Build complete project ZIP
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          out = Path('naza-cancer-full.zip')
+          excluded = {
+              Path('.chatgpt/cancer_prompt_block.txt'),
+              Path('.github/workflows/package-cancer-full.yml'),
+              out,
+          }
+          with ZipFile(out, 'w', compression=ZIP_DEFLATED) as z:
+              for p in sorted(Path('.').rglob('*')):
+                  if not p.is_file():
+                      continue
+                  rel = Path(*p.parts[1:]) if p.parts and p.parts[0] == '.' else p
+                  if '.git' in rel.parts:
+                      continue
+                  if rel in excluded:
+                      continue
+                  z.write(p, Path('naza-cancer-full') / rel)
+          print(f'Created {out} ({out.stat().st_size} bytes)')
+          PY
+
+      - name: Upload full project ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: naza-cancer-full-project
+          path: naza-cancer-full.zip
+          if-no-files-found: error
+          retention-days: 7
