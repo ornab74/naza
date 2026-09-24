@@ -498,7 +498,6 @@ else
     echo "No usable liboqs library discovered."
 
 fi
-
 ###############################################################################
 # LIBOQS VALIDATION
 ###############################################################################
@@ -786,6 +785,9 @@ else
     TMP_OQS_PY=""
 fi
 
+# Never leave the shell inside a directory that was just removed.
+cd "$HOME"
+
 ###############################################################################
 # OQS PYTHON FUNCTIONAL TEST
 ###############################################################################
@@ -966,6 +968,12 @@ PY
 # CRYPTOGRAPHY
 ###############################################################################
 
+# The liboqs-python build above runs from a temporary checkout. That checkout
+# is removed before cryptography discovery, so always restore a live cwd first.
+cd "$HOME"
+
+
+
 section "14. CRYPTOGRAPHY DISCOVERY / REPAIR"
 
 CRYPTO_WORKING=0
@@ -998,7 +1006,6 @@ ciphertext = AESGCM(key).encrypt(
     message,
     None,
 )
-
 plaintext = AESGCM(key).decrypt(
     nonce,
     ciphertext,
@@ -1497,8 +1504,7 @@ NAZA_USER_BOOT
 chmod 700 "$USER_BOOT"
 
 ###############################################################################
-# BASHRC
-###############################################################################
+# BASHRC###############################################################################
 
 section "20. REPAIRING .bashrc AUTOBOOT"
 
@@ -2198,219 +2204,3 @@ import main
 for name in (
     "read_unlock_token",
     "load_data_key",
-    "save_wrapped_key",
-):
-
-    if not hasattr(main, name):
-        raise SystemExit(
-            "main.py missing " + name
-        )
-
-print("main.py import: PASS")
-PY
-
-###############################################################################
-# FINAL LIBOQS DISCOVERY TEST
-###############################################################################
-
-section "33. FINAL LIBOQS LOCATION"
-
-echo "OQS_INSTALL_PATH:"
-echo "  $OQS_INSTALL_PATH"
-
-echo
-echo "Library:"
-find "$OQS_INSTALL_PATH/lib" \
-    -maxdepth 1 \
-    -type f \
-    -name 'liboqs.so*' \
-    -print \
-    2>/dev/null || true
-
-###############################################################################
-# FINAL KEYSTORE
-###############################################################################
-
-section "34. FINAL GATE 3 KEYSTORE STATE"
-
-"$KEYSTORE" list
-
-###############################################################################
-# PRIVATE DATA FINAL CHECK
-###############################################################################
-
-section "35. FINAL DATA PRESERVATION"
-
-for f in \
-    "$NAZA_DIR/.enc_key" \
-    "$NAZA_DIR/chat_history.db.aes" \
-    "$NAZA_DIR/chat_history.db.aes.mac"
-do
-
-    if [ -e "$f" ]; then
-        echo "PRESERVED: $f"
-    fi
-
-done
-
-for d in \
-    "$NAZA_DIR/models" \
-    "$NAZA_DIR/.naza-private-tmp"
-do
-
-    if [ -d "$d" ]; then
-        echo "PRESERVED: $d"
-    fi
-
-done
-
-###############################################################################
-# GIT STATUS
-###############################################################################
-
-section "36. GIT STATUS"
-
-if [ -d "$NAZA_DIR/.git" ]; then
-    git -C "$NAZA_DIR" status --short
-else
-    echo "Not a Git checkout."
-fi
-
-###############################################################################
-# FINAL SUMMARY
-###############################################################################
-
-section "37. REPAIR COMPLETE"
-
-cat <<SUMMARY
-
-NAZA NATIVE TERMUX REPAIR COMPLETE
-===================================
-
-Naza:
-  $NAZA_DIR
-
-Backup:
-  $BACKUP_DIR
-
-Log:
-  $LOG
-
-Native execution:
-  PASS
-
-PRoot:
-  NOT USED
-
-termux-fingerprint:
-  NOT USED
-
-libpython LD_PRELOAD:
-  NOT USED
-
-liboqs:
-  $OQS_INSTALL_PATH
-  0.14.0
-  VALIDATED
-
-liboqs-python:
-  0.12.0
-  VALIDATED
-
-ML-KEM-1024:
-  PASS
-
-HQC-256:
-  PASS
-
-X25519:
-  PASS
-
-HKDF-SHA512:
-  PASS
-
-AES-256-GCM:
-  PASS
-
-llama-cpp-python:
-  0.3.1
-  Android support repaired/validated
-
-cryptography:
-  46.0.7
-  Android import/AES-GCM validated
-  No libpython preload
-
-Process hardening:
-  non-dumpable: PASS
-  no-new-privileges: PASS
-
-Gate 3:
-  Android Keystore
-  RSA 2048
-  secure hardware
-  authentication required
-  hardware enforced
-  10-second validity
-
-NKEY4:
-  Existing key preserved
-  No automatic rekey
-
-Encrypted data:
-  Preserved
-
-Models:
-  Preserved
-
-Python syntax:
-  PASS
-
-Shell syntax:
-  PASS
-
-Security source scan:
-  PASS
-
-NEXT STEP
-==========
-
-Do NOT reinstall liboqs.
-
-First generate a fresh Gate 3 token:
-
-  bash ~/naza/naza_unlock.sh
-
-If Android asks for authentication, authenticate the phone.
-
-Then verify:
-
-  cat ~/.naza/unlock.token
-
-It should be exactly 64 lowercase hexadecimal characters.
-
-Then start:
-
-  bash ~/naza/naza-termux-boot.sh
-
-Press:
-
-  U
-
-After Naza starts, test the existing tri-hybrid path.
-
-Finally:
-
-  cd ~/naza
-  git status --short
-  git diff --stat
-
-Do NOT commit until the runtime test passes.
-
-SUMMARY
-
-echo
-echo "================================================================"
-echo " NATIVE TERMUX REPAIR FINISHED SUCCESSFULLY"
-echo "================================================================"
-echo
