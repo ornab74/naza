@@ -41,11 +41,21 @@ chmod 700 "$NAZA_DIR"
 
 # Fail closed unless the Android Keystore key is the expected Gate-3 key.
 KEY_DETAIL="$(termux-keystore list -d 2>/dev/null)" || die "cannot inspect Android Keystore"
-KEY_RECORD="$(printf '%s\n' "$KEY_DETAIL" | awk -v alias="$ALIAS" '
-  BEGIN { RS="\\\"alias\\\"[[:space:]]*:[[:space:]]*\"" }
-  index($0, "\"" alias "\"") == 1 { print; found=1; exit }
-  END { if (!found) exit 1 }
-')" || die "Android Keystore alias '$ALIAS' is missing"
+KEY_RECORD="$("$PREFIX/bin/python" - "$ALIAS" "$KEY_DETAIL" <<'PY2'
+import json
+import sys
+
+alias = sys.argv[1]
+data = json.loads(sys.argv[2])
+
+for record in data:
+    if record.get("alias") == alias:
+        print(json.dumps(record))
+        break
+else:
+    raise SystemExit(1)
+PY2
+)" || die "Android Keystore alias '$ALIAS' is missing"
 
 printf '%s\n' "$KEY_RECORD" | grep -Eq '"algorithm"[[:space:]]*:[[:space:]]*"RSA"' || die "keystore alias is not RSA"
 printf '%s\n' "$KEY_RECORD" | grep -Eq '"size"[[:space:]]*:[[:space:]]*2048' || die "keystore alias is not RSA-2048"
@@ -77,7 +87,7 @@ grep -Eq '^[0-9a-f]{64}$' "$CHALLENGE" || die "challenge file is malformed"
 echo "Authenticate/unlock the Android device, then authorize the Keystore operation."
 SIGNATURE_TMP="$(mktemp "$NAZA_DIR/.signature.XXXXXX")"
 chmod 600 "$SIGNATURE_TMP"
-"$KEYSTORE" sign "$ALIAS" "$SIGN_ALGO" "$CHALLENGE" "$SIGNATURE_TMP" || die "Android Keystore signing failed"
+"$KEYSTORE" sign "$ALIAS" "$SIGN_ALGO" < "$CHALLENGE" > "$SIGNATURE_TMP" || die "Android Keystore signing failed"
 [ -s "$SIGNATURE_TMP" ] || die "Android Keystore returned no signature"
 
 TOKEN_VALUE="$("$PREFIX/bin/python" - "$CHALLENGE" "$SIGNATURE_TMP" <<'PY'
