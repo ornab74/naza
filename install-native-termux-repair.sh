@@ -889,24 +889,29 @@ fi
 
 LLAMA_EXT="$(
     "$PYTHON_BIN" - <<'PY'
-import os
-import llama_cpp
+from pathlib import Path
+import sys
 
-print(
-    os.path.join(
-        os.path.dirname(llama_cpp.__file__),
-        "_ctypes_extensions.py"
+root = Path(sys.prefix) / "lib"
+matches = list(
+    root.glob(
+        "python*/site-packages/llama_cpp/_ctypes_extensions.py"
     )
 )
+
+if not matches:
+    raise SystemExit(
+        "Could not find llama_cpp/_ctypes_extensions.py."
+    )
+
+print(matches[0])
 PY
 )"
 
 [ -f "$LLAMA_EXT" ] ||
     die "Could not find llama_cpp/_ctypes_extensions.py."
 
-if grep -q \
-    'sys\.platform\.startswith("android")' \
-    "$LLAMA_EXT"
+if grep -q     'sys\.platform\.startswith("android")'     "$LLAMA_EXT"
 then
 
     echo "llama.cpp Android platform patch: already present."
@@ -934,14 +939,13 @@ new = (
 )
 
 if old in s:
-    p.write_text(
-        s.replace(old, new, 1)
-    )
+    p.write_text(s.replace(old, new, 1))
     print("Applied Android llama_cpp patch.")
+elif 'sys.platform.startswith("android")' in s:
+    print("Android platform support already present.")
 else:
-    print(
-        "Expected platform block not found; "
-        "checking whether Android support already exists."
+    raise SystemExit(
+        "Could not find llama_cpp platform dispatch block."
     )
 PY
 
