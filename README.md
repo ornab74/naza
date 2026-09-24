@@ -4,10 +4,6 @@
 ```
 pkg update -y && pkg upgrade -y && pkg install -y git python clang make cmake pkg-config openssl libffi && git clone https://github.com/ornab74/naza.git && cd ~/naza && chmod +x install-native-termux-repair.sh && chmod 755 "$PREFIX/lib/libtermux-exec.so" && ./install-native-termux-repair.sh
 ```
-This repository is the cleaned replacement tree reconstructed from the supplied
-NAZA recovery snapshot dated **2026-09-14**. The recovered application is kept
-as a Python/Termux program; this repository does **not** contain the abandoned
-pure-Zig rewrite attempt.
 
 The canonical Android path is now **native Termux**:
 
