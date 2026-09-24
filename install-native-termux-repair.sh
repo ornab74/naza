@@ -875,8 +875,11 @@ else
 
     echo "Installing llama-cpp-python $LLAMA_VERSION."
 
-    "$PYTHON_BIN" -m pip install \
-        "llama-cpp-python==$LLAMA_VERSION"
+    (
+        cd "$HOME"
+        "$PYTHON_BIN" -m pip install \
+            "llama-cpp-python==$LLAMA_VERSION"
+    )
 
 fi
 
