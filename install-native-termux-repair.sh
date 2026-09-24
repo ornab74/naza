@@ -786,7 +786,7 @@ else
     TMP_OQS_PY=""
 fi
 
-# Never leave the shell inside a directory that was just removed.
+# Never leave the shell inside the temporary checkout after it is removed.
 cd "$HOME"
 
 ###############################################################################
@@ -968,9 +968,6 @@ PY
 ###############################################################################
 # CRYPTOGRAPHY
 ###############################################################################
-
-# Restore a valid working directory before any pip/python discovery.
-cd "$HOME"
 
 section "14. CRYPTOGRAPHY DISCOVERY / REPAIR"
 
@@ -2198,6 +2195,8 @@ PY
 
 section "32. MAIN.PY IMPORT TEST"
 
+cd "$NAZA_DIR"
+
 "$PYTHON_BIN" - <<'PY'
 import main
 
@@ -2206,7 +2205,6 @@ for name in (
     "load_data_key",
     "save_wrapped_key",
 ):
-
     if not hasattr(main, name):
         raise SystemExit(
             "main.py missing " + name
