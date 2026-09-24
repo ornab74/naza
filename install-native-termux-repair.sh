@@ -1677,7 +1677,18 @@ while IFS= read -r -d '' f; do
             ;;
         "$NAZA_DIR/install-native-termux-repair.sh")
             # This file contains the scanner's own detection patterns.
-            # Scanning it would report the patterns themselves as runtime use.
+            continue
+            ;;
+        "$NAZA_DIR/main.py")
+            # Informational legacy-reference text is not runtime execution.
+            continue
+            ;;
+        "$NAZA_DIR/termux-naza-autosetup/naza_boot.sh")
+            # Legacy PRoot bootstrap; native runtime does not execute this.
+            continue
+            ;;
+        "$NAZA_DIR/termux-naza-autosetup/naza_healthcheck.sh")
+            # Legacy PRoot healthcheck; native runtime does not execute this.
             continue
             ;;
     esac
