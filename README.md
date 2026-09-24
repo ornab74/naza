@@ -27,34 +27,6 @@ main.py
 
 There is no normal proot hop in this path.
 
-## Install on Android
-
-From an extracted release ZIP or a Git clone inside Termux:
-
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-The installer copies the repository to `$HOME/naza` when necessary and runs the
-native reconciliation installer. Existing models, encrypted history, `.enc_key`,
-and private runtime state are intentionally preserved.
-
-After installation:
-
-```bash
-cd ~/naza
-./naza-termux-boot.sh
-```
-
-For a plain launcher after a fresh Gate-3 authorization token already exists:
-
-```bash
-./run_naza.sh
-```
-
-See [`ANDROID_INSTALL.md`](ANDROID_INSTALL.md) and
-[`TERMUX_UNLOCK.md`](TERMUX_UNLOCK.md).
 
 ## Recovered application core
 
