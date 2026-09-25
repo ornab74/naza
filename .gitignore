@@ -46,3 +46,4 @@ unlock.token
 *.pre-*
 *~
 .DS_Store
+pq-locked-requirements.zip
