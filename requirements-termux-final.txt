@@ -1,5 +1,5 @@
 # Canonical native Android/Termux runtime set recovered from the working snapshot.
-# liboqs-python 0.12.0 is installed separately by install-native-termux-repair.sh
+# liboqs-python 0.12.0 is installed separately by repair-android-termux.sh
 # against the pinned liboqs 0.14.0 native build.
 httpx==0.28.1
 aiosqlite==0.22.1

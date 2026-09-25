@@ -1,9 +1,11 @@
 # NAZA — recovered native Android / Termux build
-## Install command for android Termux
+## Install on Android with native Termux
 
 ```
-pkg update -y && pkg upgrade -y && pkg install -y git python clang make cmake pkg-config openssl libffi && git clone https://github.com/ornab74/naza.git && cd ~/naza && chmod +x install-native-termux-repair.sh && chmod 755 "$PREFIX/lib/libtermux-exec.so" && ./install-native-termux-repair.sh
+pkg update -y && pkg upgrade -y && pkg install -y git python clang make cmake pkg-config openssl libffi && git clone https://github.com/ornab74/naza.git && cd ~/naza && chmod +x install-android-termux.sh repair-android-termux.sh && chmod 755 "$PREFIX/lib/libtermux-exec.so" && ./install-android-termux.sh
 ```
+
+For Ubuntu or Debian, use `termux-naza-autosetup/setup_ubuntu.sh`; it is separate from the native Android/Termux installer.
 
 The canonical Android path is now **native Termux**:
 
@@ -20,6 +22,8 @@ naza_crypto_preflight.py
         ↓
 main.py
 ```
+The security menu offers `R` for a confirmed, fail-closed repair/reinstall after Android, Ubuntu, Linux, kernel, or package updates. Repair preserves encrypted state and never automatically rekeys it.
+
 
 There is no normal proot hop in this path.
 
@@ -96,13 +100,16 @@ The unlock helper creates a random 32-byte challenge once and stores it in
 with deterministic RSA PKCS#1 v1.5 signing this yields a repeatable derived
 64-hex gate secret, which is required for reopening data already wrapped with
 that gate. The Keystore private key itself never leaves Android Keystore.
+NAZA intentionally binds key wrapping to machine and kernel characteristics. If an OS, kernel, VM, or physical-device change alters that fingerprint, unlock fails closed and recommends the security menu’s `R` repair option. Repair validates/reinstalls the runtime but does not bypass the fingerprint or replace the encryption key. Keep recoverable backups before system upgrades.
+
 
 Do **not** delete `$HOME/.naza/challenge` after you have used Gate 3 to wrap a
 key unless you have first rewrapped/rotated that data key to another gate.
 
 ## Native installer stack
 
-The recovered reconciliation installer handles the Android stack, including:
+
+`install-android-termux.sh` is the public entry point. It deploys the tree safely, then calls `repair-android-termux.sh`, which reconciles:
 
 - Termux build/runtime packages
 - `venv-termux`
@@ -117,6 +124,9 @@ The recovered reconciliation installer handles the Android stack, including:
 - cryptographic startup preflight
 
 The exact recovered pins are retained in the installer and requirement files.
+
+GitHub Actions also builds an exact CI-only algorithm set: ML-KEM-1024 and HQC-256 for real KEM round trips, plus Dilithium2 solely to sign the canonical lock manifest. The manifest binds the commit, pinned liboqs sources, generated requirements SHA-256, exact KEM policy, and successful round trips. GitHub provenance attests the uploaded `pq-locked-requirements` artifact; KEMs test functionality, while the PQ signature and provenance authenticate the SHA-256-bound manifest.
+
 
 ## Verification
 
@@ -150,8 +160,9 @@ commit the replacement as one reviewable change.
 ## Repository layout
 
 ```text
-install.sh                         clean native-Termux entry point
-install-native-termux-repair.sh   recovered reconciliation installer
+install-android-termux.sh        native Android/Termux install entry point
+repair-android-termux.sh         native Android/Termux repair engine
+termux-naza-autosetup/setup_ubuntu.sh   separate Ubuntu/Debian installer
 install_liboqs_0.14.0.sh          pinned liboqs builder
 naza-termux-boot.sh               Gate-3 boot menu
 naza_unlock.sh                    Android Keystore authorization helper

@@ -2540,7 +2540,7 @@ def main():
     try:
         key = ensure_key_interactive()
     except Exception as exc:
-        raise SystemExit("Key initialization or unlock failed; refusing to create an ungated replacement.") from exc
+        raise SystemExit("Key initialization or unlock failed; refusing to create an ungated replacement. If the OS, kernel, or device changed, return to the security menu and choose R for secure repair/reinstall; existing encrypted data will never be rekeyed automatically.") from exc
     state = {"key": key, "model_loaded": False}
     try:
         asyncio.run(init_db(state['key']))

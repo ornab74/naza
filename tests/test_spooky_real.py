@@ -1,9 +1,21 @@
-"""Run envelope regression tests using the installed real liboqs backend."""
+"""Run tests using only an explicitly configured real liboqs backend.
+
+liboqs-python may compile a default all-algorithms backend during import when
+it cannot locate liboqs. Never permit that implicit build here.
+"""
+import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
-try:
-    import oqs
-except ImportError:
+
+oqs_prefix = os.environ.get("OQS_INSTALL_PATH")
+oqs_library = Path(oqs_prefix, "lib", "liboqs.so") if oqs_prefix else None
+if oqs_library is not None and oqs_library.is_file():
+    try:
+        import oqs
+    except (ImportError, RuntimeError):
+        oqs = None
+else:
     oqs = None
 import spooky_combiner as sc
 import test_spooky_trihybrid as tests

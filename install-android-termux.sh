@@ -34,8 +34,24 @@ if [ "$source_real" != "$target_real" ]; then
 
   STAGE_DIR="$(mktemp -d "$HOME/.naza-install-stage.XXXXXX")"
   KEEP_DIR="$(mktemp -d "$HOME/.naza-install-keep.XXXXXX")"
+  DEPLOY_COMPLETE=0
   cleanup() {
-    rm -rf -- "$STAGE_DIR" "$KEEP_DIR"
+    if [ "$DEPLOY_COMPLETE" -eq 0 ] && [ -d "$KEEP_DIR" ]; then
+      mkdir -p "$NAZA_DIR"
+      for path in "$KEEP_DIR"/* "$KEEP_DIR"/.[!.]* "$KEEP_DIR"/..?*; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        base="$(basename "$path")"
+        if [ -e "$NAZA_DIR/$base" ] || [ -L "$NAZA_DIR/$base" ]; then
+          printf 'WARNING: preserved state retained for manual recovery: %s\n' "$path" >&2
+          continue
+        fi
+        mv -- "$path" "$NAZA_DIR/"
+      done
+    fi
+    rm -rf -- "$STAGE_DIR"
+    if ! find "$KEEP_DIR" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+      rm -rf -- "$KEEP_DIR"
+    fi
   }
   trap cleanup EXIT INT TERM HUP
 
@@ -54,7 +70,7 @@ if [ "$source_real" != "$target_real" ]; then
   done
 
   [ -f "$STAGE_DIR/main.py" ] || fail "Staged tree is missing main.py"
-  [ -f "$STAGE_DIR/install-native-termux-repair.sh" ] || fail "Staged tree is missing native repair installer"
+  [ -f "$STAGE_DIR/repair-android-termux.sh" ] || fail "Staged tree is missing native repair installer"
   [ -f "$STAGE_DIR/run_naza.sh" ] || fail "Staged tree is missing run_naza.sh"
 
   # Preserve local runtime state and the repository metadata, if present.
@@ -92,17 +108,18 @@ if [ "$source_real" != "$target_real" ]; then
     mv -- "$path" "$NAZA_DIR/"
   done
 
+  DEPLOY_COMPLETE=1
   trap - EXIT INT TERM HUP
   cleanup
 fi
 
 chmod 700 \
-  "$NAZA_DIR/install.sh" \
-  "$NAZA_DIR/install-native-termux-repair.sh" \
+  "$NAZA_DIR/install-android-termux.sh" \
+  "$NAZA_DIR/repair-android-termux.sh" \
   "$NAZA_DIR/install_liboqs_0.14.0.sh" \
   "$NAZA_DIR/run_naza.sh" \
   "$NAZA_DIR/naza_unlock.sh" \
   "$NAZA_DIR/naza-termux-boot.sh" 2>/dev/null || true
 
 cd "$NAZA_DIR"
-exec bash "$NAZA_DIR/install-native-termux-repair.sh"
+exec bash "$NAZA_DIR/repair-android-termux.sh"

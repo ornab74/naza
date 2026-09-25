@@ -92,7 +92,7 @@ jobs:
 
           rm -rf /tmp/liboqs-src /tmp/liboqs.tar.gz
 
-      - name: Install pinned liboqs-python wrapper
+      - name: Install pinned liboqs-python wrapper + verify exact PQ backend
         run: |
           set -euo pipefail
 
@@ -112,10 +112,26 @@ jobs:
           python - <<'PY'
           import oqs
 
-          enabled = set(oqs.get_enabled_sig_mechanisms())
-          if "Dilithium2" not in enabled:
-              raise SystemExit("ERROR: Dilithium2 is not enabled in the pinned liboqs backend")
-          print("oqs ready; Dilithium2 enabled")
+          expected_kems = {"ML-KEM-1024", "HQC-256"}
+          expected_sigs = {"Dilithium2"}
+          enabled_kems = set(oqs.get_enabled_kem_mechanisms())
+          enabled_sigs = set(oqs.get_enabled_sig_mechanisms())
+          if enabled_kems != expected_kems:
+              raise SystemExit(f"ERROR: unexpected KEM set: {sorted(enabled_kems)}")
+          if enabled_sigs != expected_sigs:
+              raise SystemExit(f"ERROR: unexpected signature set: {sorted(enabled_sigs)}")
+
+          for algorithm in sorted(expected_kems):
+              with oqs.KeyEncapsulation(algorithm) as recipient:
+                  public_key = recipient.generate_keypair()
+                  with oqs.KeyEncapsulation(algorithm) as sender:
+                      ciphertext, sender_secret = sender.encap_secret(public_key)
+                  recipient_secret = recipient.decap_secret(ciphertext)
+              if sender_secret != recipient_secret:
+                  raise SystemExit(f"ERROR: {algorithm} KEM round trip failed")
+              print(f"{algorithm}: KEM round trip PASS")
+
+          print("oqs ready; exact minimal CI algorithm set verified")
           PY
 
           echo "LIBOQS_PY_REF=${LIBOQS_PY_REF}" >> "$GITHUB_ENV"
@@ -172,6 +188,15 @@ jobs:
 
           manifest_obj = {
               "format": "pq-lock-manifest-v1",
+              "git_commit": os.environ["GITHUB_SHA"],
+              "liboqs": {
+                  "version": os.environ["LIBOQS_VERSION"],
+                  "source_sha256": os.environ["LIBOQS_SHA256"],
+                  "python_ref": os.environ["LIBOQS_PY_REF"],
+                  "python_source_sha256": os.environ["LIBOQS_PY_SHA256"],
+              },
+              "kem_policy": ["HQC-256", "ML-KEM-1024"],
+              "kem_round_trips": {"HQC-256": True, "ML-KEM-1024": True},
               "pq_alg": ALG,
               "requirements_txt_sha256": req_sha256,
               "pinned": pinned,

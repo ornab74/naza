@@ -8,6 +8,7 @@ PROOT_BOOT = Path(__file__).parents[1] / "termux-naza-autosetup" / "naza_boot.sh
 PROOT_HEALTH = Path(__file__).parents[1] / "termux-naza-autosetup" / "naza_healthcheck.sh"
 NATIVE_SETUP = Path(__file__).parents[1] / "termux-naza-autosetup" / "setup_ubuntu.sh"
 RUNNER = Path(__file__).parents[1] / "run_naza.sh"
+NATIVE_BOOT = Path(__file__).parents[1] / "naza-termux-boot.sh"
 UNLOCKERS = (
     Path(__file__).parents[1] / "naza_unlock.sh",
     Path(__file__).parents[1] / "termux-naza-autosetup" / "naza_unlock.sh",
@@ -40,6 +41,16 @@ class CiSupplyChainTests(unittest.TestCase):
         for artifact in ("requirements.txt", "lock.manifest.json", "lock.manifest.pqsig", "pq_pubkey.b64"):
             self.assertIn(artifact, workflow[attest_at:upload_at])
 
+    def test_pq_ci_checks_exact_kems_and_round_trips(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\"-DOQS_MINIMAL_BUILD=KEM_ml_kem_1024;KEM_hqc_256;SIG_dilithium_2\"", workflow)
+        self.assertIn("expected_kems = {\"ML-KEM-1024\", \"HQC-256\"}", workflow)
+        self.assertIn("sender.encap_secret(public_key)", workflow)
+        self.assertIn("recipient.decap_secret(ciphertext)", workflow)
+        self.assertIn("\"kem_round_trips\": {\"HQC-256\": True, \"ML-KEM-1024\": True}", workflow)
+        self.assertIn("\"git_commit\": os.environ[\"GITHUB_SHA\"]", workflow)
+
+
     def test_ci_bootstrap_and_actions_are_immutable(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python:3.12-slim@sha256:", workflow)
@@ -64,6 +75,8 @@ class CiSupplyChainTests(unittest.TestCase):
         self.assertNotIn('mktemp "$HOME/.naza/.unlock.token.XXXXXX"', boot)
         self.assertIn('NAZA_TOKEN_OUTPUT=stdout bash "$UNLOCK_SH"', boot)
         self.assertIn("exec 9< <(NAZA_TOKEN_OUTPUT", boot)
+        self.assertIn("Select [U/R/Q]", boot)
+        self.assertIn("Type REPAIR to continue", boot)
         self.assertIn('export NAZA_UNLOCK_FD=9', boot)
         self.assertNotIn("HOST_TOKEN=", boot)
         self.assertNotIn("TOKEN_VALUE=", boot)
@@ -78,7 +91,11 @@ class CiSupplyChainTests(unittest.TestCase):
         for path in UNLOCKERS:
             script = path.read_text(encoding="utf-8")
             self.assertIn("termux-keystore list -d", script)
-            self.assertIn('awk -v alias="$ALIAS"', script)
+            self.assertTrue(
+                'awk -v alias="$ALIAS"' in script
+                or 'json.loads(sys.argv[2])' in script,
+                f"{path} must parse detailed keystore metadata structurally",
+            )
             self.assertIn("does not require Android authentication", script)
 
     def test_deployment_healthcheck_uses_isolated_guest(self):
@@ -121,8 +138,18 @@ class CiSupplyChainTests(unittest.TestCase):
         self.assertIn('naza_crypto_preflight.py', runner)
         self.assertIn('export NAZA_REQUIRE_PROCESS_HARDENING=1', runner)
 
+    def test_native_repair_menu_and_strict_machine_binding(self):
+        boot = NATIVE_BOOT.read_text(encoding="utf-8")
+        main = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
+        self.assertIn("Select [U/R/Q]", boot)
+        self.assertIn("Type REPAIR to continue", boot)
+        self.assertIn("never automatically rekey", boot)
+        self.assertIn("parts.append(u.release)", main)
+        self.assertIn("choose R for secure repair/reinstall", main)
+
+
     def test_crypto_runtime_pins_include_security_fixes_and_argon2(self):
-        repair = (Path(__file__).parents[1] / "install-native-termux-repair.sh").read_text(encoding="utf-8")
+        repair = (Path(__file__).parents[1] / "repair-android-termux.sh").read_text(encoding="utf-8")
         self.assertIn('CRYPTO_VERSION="46.0.7"', repair)
         self.assertIn('ARGON2_VERSION="25.1.0"', repair)
         self.assertIn('ARGON2_BINDINGS_VERSION="25.1.0"', repair)

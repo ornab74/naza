@@ -83,6 +83,9 @@ OQS_VERSION="0.14.0"
 OQS_HOME="$HOME/.local/liboqs-$OQS_VERSION"
 OQS_SRC="$HOME/liboqs-$OQS_VERSION"
 
+LIBOQS_PY_REF="7906e7879a099fa34217035957d977314f99757d"
+LIBOQS_PY_SHA256="ed785fee58e43f20c042db97389ce63091b331278c24f63828c4b8dac0905f8c"
+LIBOQS_PY_URL="https://github.com/open-quantum-safe/liboqs-python/archive/${LIBOQS_PY_REF}.tar.gz"
 OQS_PY_VERSION="0.12.0"
 CRYPTO_VERSION="46.0.7"
 ARGON2_VERSION="25.1.0"
@@ -612,82 +615,21 @@ else
     echo "A valid liboqs 0.14.0 installation was not found."
     echo "Only now will a build be attempted."
 
-    if [ ! -d "$OQS_SRC/.git" ]; then
+    BUILDER="$NAZA_DIR/install_liboqs_0.14.0.sh"
+    [ -f "$BUILDER" ] && [ ! -L "$BUILDER" ] ||
+        die "Pinned liboqs installer is missing or is a symlink."
+    BUILDER_MODE="$(stat -c "%a" "$BUILDER" 2>/dev/null || stat -f "%Lp" "$BUILDER")"
+    [ $((8#$BUILDER_MODE & 8#022)) -eq 0 ] ||
+        die "Pinned liboqs installer is group/other writable."
+    chmod 700 "$BUILDER"
 
-        rm -rf "$OQS_SRC"
-
-        git clone \
-            --depth 1 \
-            --branch 0.14.0 \
-            --single-branch \
-            https://github.com/open-quantum-safe/liboqs.git \
-            "$OQS_SRC"
-
-    fi
-
-    cd "$OQS_SRC"
-
-    TAG="$(
-        git describe \
-            --tags \
-            --exact-match \
-            HEAD \
-            2>/dev/null || true
-    )"
-
-    if [ "$TAG" != "$OQS_VERSION" ]; then
-
-        git fetch \
-            --depth 1 \
-            origin \
-            "refs/tags/$OQS_VERSION:refs/tags/$OQS_VERSION"
-
-        git checkout "$OQS_VERSION"
-
-    fi
-
-    TAG="$(
-        git describe \
-            --tags \
-            --exact-match \
-            HEAD \
-            2>/dev/null || true
-    )"
-
-    [ "$TAG" = "$OQS_VERSION" ] ||
-        die "liboqs source is not tag $OQS_VERSION."
-
-    rm -rf build
-
-    cmake -S . -B build \
-        -G "Unix Makefiles" \
-        -DCMAKE_BUILD_TYPE=MinSizeRel \
-        -DCMAKE_INSTALL_PREFIX="$OQS_HOME" \
-        -DBUILD_SHARED_LIBS=ON \
-        -DOQS_BUILD_ONLY_LIB=ON \
-        -DOQS_DIST_BUILD=OFF \
-        -DOQS_MINIMAL_BUILD="KEM_ml_kem_1024;KEM_hqc_256" \
-        -DOQS_ENABLE_KEM_HQC=ON \
-        -DOQS_USE_OPENSSL=ON \
-        -DOQS_MEMOPT_BUILD=ON \
-        -DCMAKE_C_FLAGS="-Os -g0"
-
-    cmake --build build --parallel 1
-
-    cmake --install build
-
+    PREFIX="$OQS_HOME" PYTHON_BIN="$PYTHON_BIN" SRC_ROOT="$HOME/src" "$BUILDER"
     OQS_LIB="$OQS_HOME/lib/liboqs.so"
-
-    [ -f "$OQS_LIB" ] ||
-        die "liboqs build completed but library is missing."
-
-    export OQS_INSTALL_PATH="$OQS_HOME"
-    export LD_LIBRARY_PATH="$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
     validate_oqs "$OQS_LIB" ||
-        die "New liboqs installation failed validation."
+        die "New hash-verified minimal liboqs installation failed validation."
 
 fi
+
 
 ###############################################################################
 # FINAL OQS NORMALIZATION
@@ -745,42 +687,23 @@ else
 
     echo "Installing/reparing liboqs-python 0.12.0."
 
-    TMP_OQS_PY="$(
-        mktemp -d
-    )"
-
+    echo "Installing hash-verified liboqs-python 0.12.0 wrapper."
+    TMP_OQS_PY="$(mktemp -d)"
+    OQS_PY_ARCHIVE="$TMP_OQS_PY/liboqs-python.tar.gz"
     trap '
         rm -rf "${TMP_OQS_PY:-}"
         rm -f "$LOCK"
     ' EXIT
 
-    git clone \
-        --depth 1 \
-        --branch 0.12.0 \
-        --single-branch \
-        https://github.com/open-quantum-safe/liboqs-python.git \
-        "$TMP_OQS_PY/liboqs-python"
-
-    cd "$TMP_OQS_PY/liboqs-python"
-
-    OQS_PY_ACTUAL_COMMIT="$(
-        git rev-parse HEAD
-    )"
-
-    echo "liboqs-python commit:"
-    echo "  $OQS_PY_ACTUAL_COMMIT"
-
-    "$PYTHON_BIN" -m pip uninstall -y \
-        liboqs-python \
-        oqs \
-        2>/dev/null || true
+    curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+        "$LIBOQS_PY_URL" -o "$OQS_PY_ARCHIVE"
+    printf "%s  %s\n" "$LIBOQS_PY_SHA256" "$OQS_PY_ARCHIVE" | sha256sum -c -
 
     export OQS_INSTALL_PATH="$OQS_HOME"
     export LD_LIBRARY_PATH="$OQS_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    "$PYTHON_BIN" -m pip uninstall -y liboqs-python oqs 2>/dev/null || true
+    "$PYTHON_BIN" -m pip install --no-deps --force-reinstall "$OQS_PY_ARCHIVE"
 
-    "$PYTHON_BIN" -m pip install \
-        --no-deps \
-        .
 
     rm -rf "$TMP_OQS_PY"
     TMP_OQS_PY=""
@@ -1439,30 +1362,57 @@ export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
 NAZA_DIR="$HOME/naza"
 UNLOCK="$NAZA_DIR/naza_unlock.sh"
 RUN="$NAZA_DIR/run_naza.sh"
+REPAIR="$NAZA_DIR/repair-android-termux.sh"
 
 [ -x "$UNLOCK" ] || { echo "ERROR: Gate 3 helper missing: $UNLOCK" >&2; exit 1; }
 [ -x "$RUN" ] || { echo "ERROR: launcher missing: $RUN" >&2; exit 1; }
+[ -f "$REPAIR" ] && [ ! -L "$REPAIR" ] || { echo "ERROR: secure repair installer missing or unsafe: $REPAIR" >&2; exit 1; }
+[ "$(stat -c %u "$REPAIR")" = "$(id -u)" ] || { echo "ERROR: secure repair installer has wrong owner" >&2; exit 1; }
+REPAIR_MODE="$(stat -c %a "$REPAIR")"
+[ $((8#$REPAIR_MODE & 8#022)) -eq 0 ] || { echo "ERROR: secure repair installer is group/other writable" >&2; exit 1; }
 
 while true; do
     clear 2>/dev/null || true
     cat <<'MENU'
-╔══════════════════════════════════════════╗
-║              NAZA SECURITY               ║
-╠══════════════════════════════════════════╣
-║       Android Keystore Gate 3            ║
-║                                          ║
-║  Unlock/authenticate the phone, then:    ║
-║                                          ║
-║  U = authorize + start Naza              ║
-║  Q = quit                                ║
-╚══════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║                                                          ║
+║  ███╗   ██╗ █████╗ ███████╗ █████╗                     ║
+║  ████╗  ██║██╔══██╗╚══███╔╝██╔══██╗                    ║
+║  ██╔██╗ ██║███████║  ███╔╝ ███████║                    ║
+║  ██║╚██╗██║██╔══██║ ███╔╝  ██╔══██║                    ║
+║  ██║ ╚████║██║  ██║███████╗██║  ██║                    ║
+║  ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝                    ║
+║                                                          ║
+╠══════════════════════════════════════════════════════════╣
+║                 Android Keystore Gate 3                  ║
+║                                                          ║
+║       Unlock/authenticate the phone, then choose:        ║
+║                                                          ║
+║       U = authorize + start Naza                         ║
+║       R = secure repair/reinstall                        ║
+║       Q = quit                                           ║
+╚══════════════════════════════════════════════════════════╝
 MENU
-    printf '\nSelect [U/Q]: '
+    printf '\nSelect [U/R/Q]: '
     IFS= read -r answer || exit 0
     case "$answer" in
         U|u)
             "$UNLOCK" || { echo "Gate 3 authorization failed." >&2; read -r -p "Press Enter..." _ || true; continue; }
             exec "$RUN"
+            ;;
+        R|r)
+            echo "This validates and repairs the current OS-specific runtime."
+            echo "Encrypted keys, history, models, and Gate 3 state are preserved."
+            echo "It will never automatically rekey data after a device/kernel change."
+            printf "Type REPAIR to continue: "
+            IFS= read -r confirm || continue
+            [ "$confirm" = "REPAIR" ] || { echo "Repair cancelled."; sleep 1; continue; }
+            if bash "$REPAIR"; then
+                echo "Secure repair completed and validated."
+            else
+                echo "Secure repair failed; encrypted state was not intentionally rekeyed." >&2
+            fi
+            read -r -p "Press Enter to return to the security menu..." _ || true
             ;;
         Q|q) exit 0 ;;
         *) echo "Invalid selection."; sleep 1 ;;
@@ -1569,7 +1519,7 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 export LD_PRELOAD="$PREFIX/lib/libtermux-exec.so"
 
-exec bash "$HOME/naza/install-native-termux-repair.sh"
+exec bash "$HOME/naza/repair-android-termux.sh"
 
 NAZA_SETUP
 
@@ -1583,7 +1533,7 @@ bash -n "$TERMUX_SETUP"
 section "22. INSTALLER SELF-PERMISSION"
 
 chmod 700 \
-    "$NAZA_DIR/install-native-termux-repair.sh"
+    "$NAZA_DIR/repair-android-termux.sh"
 
 ###############################################################################
 # PYTHON SYNTAX — ALL REPO
@@ -1682,7 +1632,7 @@ while IFS= read -r -d '' f; do
         */__pycache__/*)
             continue
             ;;
-        "$NAZA_DIR/install-native-termux-repair.sh")
+        "$NAZA_DIR/repair-android-termux.sh")
             # This file contains the scanner's own detection patterns.
             continue
             ;;
