@@ -1,7 +1,6 @@
 43d0e622c0b136e092dc69a0193e2c69a730f9efb23d9938864508c898f4ca7b  ./.gitattributes
 ed704a4ced0059fcc67775c9e85f366dc407bdb8e991801796f2c2b19b045d0b  ./.github/workflows/lock-requirements.yml
-5a087dec99cc1c24bc167bafadb96e31d97029a5f4aa7f711f79f93e8a61b53d  ./.gitignore
-9be4aaf054f318f0a617b99ed35dd8f302fae5793f86a21a4d22da97505443a6  ./.installer-manifest
+58e75956a4a99e9b2c2845b50ac0e0f7afc624503dd60d5a7f40ec7a3a5fd36e  ./.gitignore
 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  ./LICENSE
 80013cc1f3be6b35be833d0421e2abd00acdfbd6336bbdcc6521f535a619b413  ./README.md
 b6cbc5ee6fde5ebc42cf56e9648265fc2c0cf3450606eca4e994047ef13484e5  ./bootstrap-requirements.in
