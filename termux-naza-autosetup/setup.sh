@@ -5,7 +5,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 REPO_URL="https://github.com/ornab74/naza.git"
-NAZA_REF="bcd6fcf76b4cea998b51afadcd816753a6ccb4ec"
+NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e"
 DISTRO_ALIAS="ubuntu"
 DISTRO_IMAGE="ubuntu:24.04"
 NAZA_USER="sudouser"
@@ -74,7 +74,7 @@ say "Cloning/updating NAZA as ${NAZA_USER} at pinned commit ${NAZA_REF}"
 proot-distro login --user "$NAZA_USER" "$DISTRO_ALIAS" -- /bin/bash -lc '
 set -Eeuo pipefail
 REPO_URL="https://github.com/ornab74/naza.git"
-NAZA_REF="bcd6fcf76b4cea998b51afadcd816753a6ccb4ec"
+NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e"
 APP="$HOME/naza"
 
 if [ -d "$APP/.git" ]; then
@@ -109,7 +109,7 @@ proot-distro login --user "$NAZA_USER" "$DISTRO_ALIAS" -- /bin/bash -lc '
 set -Eeuo pipefail
 cd "$HOME/naza"
 chmod +x termux-naza-autosetup/setup_ubuntu.sh
-NAZA_APP_DIR="$HOME/naza" NAZA_REPO_URL="https://github.com/ornab74/naza.git" NAZA_REF="bcd6fcf76b4cea998b51afadcd816753a6ccb4ec" \
+NAZA_APP_DIR="$HOME/naza" NAZA_REPO_URL="https://github.com/ornab74/naza.git" NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e" \
     bash termux-naza-autosetup/setup_ubuntu.sh
 '
 
@@ -222,7 +222,7 @@ Open Termux WITHOUT autostarting NAZA:
   NAZA_NO_AUTOSTART=1 bash
 
 Pinned NAZA commit:
-  bcd6fcf76b4cea998b51afadcd816753a6ccb4ec
+  aa3f3056c883223734af0aff311757dc91f5233e
 
 Expected path:
   Termux
