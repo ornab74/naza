@@ -466,47 +466,37 @@ def metrics_to_rgb(metrics: dict) -> Tuple[float,float,float]:
     maxi = max(r,g,b,1.0); r,g,b = r/maxi,g/maxi,b/maxi
     return (float(max(0.0,min(1.0,r))), float(max(0.0,min(1.0,g))), float(max(0.0,min(1.0,b))))
 
-def _sanitize_rgb(rgb: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """Coerce RGB-like inputs to finite Python floats in the closed interval [0, 1]."""
-    if len(rgb) != 3:
-        raise ValueError(f"rgb must contain exactly 3 values, got {len(rgb)}")
-
-    values = []
+def pennylane_entropic_score(rgb: Tuple[float,float,float], shots: int = 256) -> float:
+    # Collapse all RGB inputs to finite native Python floats in [0, 1].
+    vals = []
     for value in rgb:
-        value = float(value)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0.0
         if not math.isfinite(value):
             value = 0.0
-        values.append(max(0.0, min(1.0, value)))
-    return tuple(values)
+        vals.append(max(0.0, min(1.0, value)))
+    a, b, c = vals
 
+    def classical_fallback() -> float:
+        # Bit shifting floats is invalid; quantize to 8-bit RGB first.
+        ri = int(round(a * 255.0))
+        gi = int(round(b * 255.0))
+        bi = int(round(c * 255.0))
+        seed = (ri << 16) | (gi << 8) | bi
 
-def _classical_entropic_score(rgb: Tuple[float, float, float]) -> float:
-    """Deterministic fallback used when PennyLane is unavailable or the circuit fails."""
-    r, g, b = _sanitize_rgb(rgb)
+        # Keep deterministic noise local so global RNG state is untouched.
+        rng = random.Random(seed)
+        base = 0.3 * a + 0.4 * b + 0.3 * c
+        noise = (rng.random() - 0.5) * 0.08
+        return float(max(0.0, min(1.0, base + noise)))
 
-    # Convert channels to integers *before* bit shifting.  Shifting floats raises TypeError.
-    ri = int(round(r * 255.0))
-    gi = int(round(g * 255.0))
-    bi = int(round(b * 255.0))
-    seed = (ri << 16) | (gi << 8) | bi
-
-    # Keep the fallback deterministic without mutating Python's global RNG state.
-    rng = random.Random(seed)
-    base = 0.3 * r + 0.4 * g + 0.3 * b
-    noise = (rng.random() - 0.5) * 0.08
-    return float(max(0.0, min(1.0, base + noise)))
-
-
-def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) -> float:
-    a, b, c = _sanitize_rgb(rgb)
-
-    # pnp is not used by this circuit, so only PennyLane itself is required here.
-    if qml is None:
-        return _classical_entropic_score((a, b, c))
+    if qml is None or pnp is None:
+        return classical_fallback()
 
     try:
-        shots = max(1, int(shots))
-        dev = qml.device("default.qubit", wires=2, shots=shots)
+        dev = qml.device("default.qubit", wires=2, shots=max(1, int(shots)))
 
         @qml.qnode(dev)
         def circuit(x, y, z):
@@ -520,17 +510,18 @@ def pennylane_entropic_score(rgb: Tuple[float, float, float], shots: int = 256) 
 
         ev0, ev1 = circuit(a, b, c)
 
-        # PennyLane/NumPy may return scalar wrapper types; collapse them here.
+        # PennyLane may return framework scalar objects; convert explicitly.
         ev0 = float(ev0)
         ev1 = float(ev1)
-        combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
-        combined = max(0.0, min(1.0, float(combined)))
+        if not (math.isfinite(ev0) and math.isfinite(ev1)):
+            return classical_fallback()
 
+        combined = ((ev0 + 1.0) / 2.0) * 0.6 + ((ev1 + 1.0) / 2.0) * 0.4
         score = 1.0 / (1.0 + math.exp(-6.0 * (combined - 0.5)))
         return float(max(0.0, min(1.0, score)))
     except Exception:
-        # A quantum backend failure should not break the road scanner.
-        return _classical_entropic_score((a, b, c))
+        # A plugin/backend/type failure should not kill the scanner.
+        return classical_fallback()
 
 def entropic_to_modifier(score: float) -> float:
     return (score - 0.5) * 0.4
@@ -605,48 +596,110 @@ def chunked_generate(llm: Llama, prompt: str, max_total_tokens: int = 256, chunk
         cur_prompt = prompt + "\n\nAssistant so far:\n" + assembled + "\n\nContinue:"
     return assembled.strip()
 
-def build_road_scanner_prompt(data: dict, include_system_entropy: bool = True) -> str:
+def build_theft_scanner_prompt(data: dict, include_system_entropy: bool = True) -> str:
     entropy_text = "entropic_score=unknown"
     if include_system_entropy:
         metrics = collect_system_metrics()
         rgb = metrics_to_rgb(metrics)
         score = pennylane_entropic_score(rgb)
         entropy_text = entropic_summary_text(score)
-        metrics_line = "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},temp={temp:.2f},proc={proc:.2f}".format(cpu=metrics.get("cpu",0.0), mem=metrics.get("mem",0.0), load1=metrics.get("load1",0.0), temp=metrics.get("temp",0.0), proc=metrics.get("proc",0.0))
+        metrics_line = (
+            "sys_metrics: cpu={cpu:.2f},mem={mem:.2f},load={load1:.2f},"
+            "temp={temp:.2f},proc={proc:.2f}"
+        ).format(
+            cpu=metrics.get("cpu", 0.0),
+            mem=metrics.get("mem", 0.0),
+            load1=metrics.get("load1", 0.0),
+            temp=metrics.get("temp", 0.0),
+            proc=metrics.get("proc", 0.0),
+        )
     else:
         metrics_line = "sys_metrics: disabled"
+
     tpl = (
-f"You are a Hypertime Nanobot specialized Road Risk Classification AI trained to evaluate real-world driving scenes.\n"
-f"Analyze and Triple Check for validating accuracy the environmental and sensor data and determine the overall road risk level.\n"
-f"Your reply must be only one word: Low, Medium, or High.\n\n"
-f"[tuning]\n"
-f"Scene details:\n"
-f"Location: {data.get('location','unspecified location')}\n"
-f"Road type: {data.get('road_type','unknown')}\n"
-f"Weather: {data.get('weather','unknown')}\n"
-f"Traffic: {data.get('traffic','unknown')}\n"
-f"Obstacles: {data.get('obstacles','none')}\n"
-f"Sensor notes: {data.get('sensor_notes','none')}\n"
-f"{metrics_line}\n"
-f"Quantum State: {entropy_text}\n"
-f"[/tuning]\n\n"
-f"Follow these strict rules when forming your decision:\n"
-f"- Think through all scene factors internally but do not show reasoning.\n"
-f"- Evaluate surface, visibility, weather, traffic, and obstacles holistically.\n"
-f"- Optionally use the system entropic signal to bias your internal confidence slightly.\n"
-f"- Choose only one risk level that best fits the entire situation.\n"
-f"- Output exactly one word, with no punctuation or labels.\n"
-f"- The valid outputs are only: Low, Medium, High.\n\n"
-f"[action]\n"
-f"1) Normalize sensor inputs to comparable scales.\n"
-f"3) Map environmental risk cues -> discrete label using conservative thresholds.\n"
-f"4) If sensor integrity anomalies are detected, bias toward higher risk.\n"
-f"5) PUNKD: detect key tokens and locally adjust attention/temperature slightly to focus decisions.\n"
-f"6) Do not output internal reasoning or diagnostics; only return the single-word label.\n"
-f"[/action]\n\n"
-f"[replytemplate]\nLow | Medium | High\n[/replytemplate]"
+        "You are a Hypertime Nanobot specialized Theft Risk Classification AI "
+        "trained to evaluate real-world scenes for opportunistic theft.\n"
+        "Analyze the environmental, social, and sensor data and determine the "
+        "overall theft risk level and the single most likely theft target.\n\n"
+        "Your reply must be exactly in this format:\n"
+        "RiskLevel | TheftType\n\n"
+        "Valid RiskLevel values: Low, Medium, High\n"
+        "Valid TheftType values: vehicle, electronics, tools, phone, other\n\n"
+        "[tuning]\n"
+        f"Location: {data.get('location','unspecified location')}\n"
+        f"Area type: {data.get('area_type','unknown')}\n"
+        f"Time: {data.get('time','unknown')}\n"
+        f"Lighting: {data.get('lighting','unknown')}\n"
+        f"Foot traffic: {data.get('foot_traffic','unknown')}\n"
+        f"Parking / vehicle density: {data.get('parking','unknown')}\n"
+        f"Recent incidents: {data.get('recent_incidents','none')}\n"
+        f"Surveillance: {data.get('cctv','unknown')}\n"
+        f"Security presence: {data.get('security','none')}\n"
+        f"Vulnerable population: {data.get('vulnerable_population','none')}\n"
+        f"Sensor notes: {data.get('sensor_notes','none')}\n"
+        f"{metrics_line}\n"
+        f"Quantum State: {entropy_text}\n"
+        "[/tuning]\n\n"
+        "Follow these strict rules:\n"
+        "- Think through all factors internally but do not show reasoning.\n"
+        "- Evaluate lighting, visibility, foot traffic, parking density, "
+        "surveillance, security, and recent incidents holistically.\n"
+        "- If several theft targets are plausible, choose the single most likely.\n"
+        "- Sensor-integrity anomalies may bias the risk estimate upward slightly.\n"
+        "- The system entropic signal may only be used as a small confidence bias.\n"
+        "- Output exactly one risk level, then ' | ', then one theft type.\n"
+        "- Do not add punctuation, explanations, labels, or extra text.\n\n"
+        "[replytemplate]\n"
+        "Low | vehicle\n"
+        "Low | electronics\n"
+        "Low | tools\n"
+        "Low | phone\n"
+        "Low | other\n"
+        "Medium | vehicle\n"
+        "Medium | electronics\n"
+        "Medium | tools\n"
+        "Medium | phone\n"
+        "Medium | other\n"
+        "High | vehicle\n"
+        "High | electronics\n"
+        "High | tools\n"
+        "High | phone\n"
+        "High | other\n"
+        "[/replytemplate]"
     )
     return tpl
+
+
+def parse_theft_result(text: str) -> Tuple[str, str]:
+    cleaned = (text or "").strip()
+    risk = None
+    theft_type = None
+
+    # Prefer a strict "Risk | Type" match anywhere in the output.
+    m = re.search(
+        r"\b(Low|Medium|High)\b\s*\|\s*"
+        r"\b(vehicle|electronics|tools|phone|other)\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        risk = m.group(1).capitalize()
+        theft_type = m.group(2).lower()
+        return risk, theft_type
+
+    # Conservative recovery for small models that ignore the exact template.
+    lower = cleaned.lower()
+    for candidate in ("high", "medium", "low"):
+        if re.search(rf"\b{candidate}\b", lower):
+            risk = candidate.capitalize()
+            break
+
+    for candidate in ("vehicle", "electronics", "tools", "phone", "other"):
+        if re.search(rf"\b{candidate}\b", lower):
+            theft_type = candidate
+            break
+
+    return risk or "Medium", theft_type or "other"
 
 def header(status:dict):
     s = f" Secure LLM CLI — Model: {'loaded' if status.get('model_loaded') else 'none'} | Key: {'present' if status.get('key') else 'missing'} "
@@ -743,88 +796,146 @@ async def chat_session(state:dict):
             except Exception as e: print(f"Cleanup failed: {e}")
             input("Enter...")
 
-async def road_scanner_flow(state:dict):
-    if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
-    data={}
-    clear_screen(); header(state)
-    print(boxed("Road Scanner - Step 1/6", ["Leave blank for defaults"]))
-    data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip() or "unspecified location"
-    data['road_type'] = input("Road type (highway/urban/residential): ").strip() or "highway"
-    data['weather'] = input("Weather/visibility: ").strip() or "clear"
-    data['traffic'] = input("Traffic density (low/med/high): ").strip() or "low"
-    data['obstacles'] = input("Reported obstacles: ").strip() or "none"
-    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
-    print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
+async def theft_scanner_flow(state:dict):
+    if not ENCRYPTED_MODEL.exists():
+        print("No encrypted model found.")
+        input("Enter...")
+        return
+
+    data = {}
+    clear_screen()
+    header(state)
+    print(boxed("Theft Scanner - Step 1", ["Leave blank for defaults"]))
+
+    data["location"] = input("Location: ").strip() or "unspecified location"
+    data["area_type"] = input("Area type (parking lot/street/store/transit/etc.): ").strip() or "unknown"
+    data["time"] = input("Time / time of day: ").strip() or "unknown"
+    data["lighting"] = input("Lighting (bright/moderate/dim/dark): ").strip() or "unknown"
+    data["foot_traffic"] = input("Foot traffic (low/medium/high): ").strip() or "unknown"
+    data["parking"] = input("Parking / vehicle density: ").strip() or "unknown"
+    data["recent_incidents"] = input("Recent theft incidents: ").strip() or "none"
+    data["cctv"] = input("Surveillance / CCTV: ").strip() or "unknown"
+    data["security"] = input("Security presence: ").strip() or "none"
+    data["vulnerable_population"] = input("Vulnerable population / targets: ").strip() or "none"
+    data["sensor_notes"] = input("Sensor notes: ").strip() or "none"
+
+    print("\nGeneration options:\n1) Chunked generation + PUNKD\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
-    prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+
+    prompt = build_theft_scanner_prompt(data, include_system_entropy=True)
+    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state["key"])
     loop = asyncio.get_running_loop()
+
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
             llm = await loop.run_in_executor(ex, load_llama_model_blocking, MODEL_PATH)
         except Exception as e:
             print(f"Model load failed: {e}")
             if MODEL_PATH.exists():
-                try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
-                except Exception: pass
-            input("Enter..."); return
+                try:
+                    encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state["key"])
+                    MODEL_PATH.unlink()
+                except Exception:
+                    pass
+            input("Enter...")
+            return
+
         def gen_direct(p):
-            out = llm(p, max_tokens=128, temperature=0.2)
+            out = llm(p, max_tokens=64, temperature=0.15)
             if isinstance(out, dict):
-                try: text = out.get("choices",[{"text":""}])[0].get("text","")
-                except Exception: text = out.get("text","")
-            else: text = str(out)
-            text = (text or "").strip()
-            return text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
-        if gen_choice == "3":
-            print("Scanning (single-call)...")
-            result = await loop.run_in_executor(ex, gen_direct, prompt)
-        else:
-            punkd_profile = "balanced" if gen_choice=="1" else "conservative"
-            print("Scanning with chunked generation (this may take a moment)...")
-            def run_chunked():
-                return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-            result = await loop.run_in_executor(ex, run_chunked)
-        text = (result or "").strip().replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","")
-        candidate = text.split()
-        label = candidate[0].capitalize() if candidate else ""
-        if label not in ("Low","Medium","High"):
-            lowered = text.lower()
-            if "low" in lowered: label = "Low"
-            elif "medium" in lowered: label = "Medium"
-            elif "high" in lowered: label = "High"
-            else: label = "Medium"
-        print("\n--- Road Scanner Result ---\n")
-        if label == "Low": print(color(label, fg=32, bold=True))
-        elif label == "Medium": print(color(label, fg=33, bold=True))
-        else: print(color(label, fg=31, bold=True))
-        print("\nOptions: 1) Re-run with edits  2) Export to JSON  3) Save & return  4) Cancel")
-        ch = input("Choose (1-4): ").strip()
-        if ch=="1":
-            print("Re-run: editing fields. Press Enter to keep current value.")
-            for k in list(data.keys()):
-                v = input(f"{k} [{data[k]}]: ").strip()
-                if v: data[k]=v
-            prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-            print("Re-scanning...")
-            if gen_choice == "3": result = await loop.run_in_executor(ex, gen_direct, prompt)
+                try:
+                    text = out.get("choices", [{"text": ""}])[0].get("text", "")
+                except Exception:
+                    text = out.get("text", "")
             else:
-                def run_chunked2(): return chunked_generate(llm=llm, prompt=prompt, max_total_tokens=256, chunk_tokens=64, base_temperature=0.18, punkd_profile=punkd_profile, streaming_callback=None)
-                result = await loop.run_in_executor(ex, run_chunked2)
-            print("\n"+(result or ""))
-        if ch in ("2","3"):
-            try: await init_db(state['key']); await log_interaction("ROAD_SCANNER_PROMPT:\n"+prompt, "ROAD_SCANNER_RESULT:\n"+label, state['key'])
-            except Exception as e: print(f"Failed to log: {e}")
-        if ch=="2":
-            outp = {"input": data, "prompt": prompt, "result": label, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
-            fn = input("Filename to save JSON (default road_scan.json): ").strip() or "road_scan.json"
-            Path(fn).write_text(json.dumps(outp, indent=2)); print(f"Saved {fn}")
-        try: del llm
-        except Exception: pass
-        print("Re-encrypting model and removing plaintext...")
-        try: encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key']); MODEL_PATH.unlink()
-        except Exception as e: print(f"Cleanup error: {e}")
-        input("Enter to return...")
+                text = str(out)
+            return (text or "").strip().replace(
+                "You are a helpful AI assistant named SmolLM, trained by Hugging Face", ""
+            ).strip()
+
+        async def run_scan(current_prompt):
+            if gen_choice == "3":
+                print("Scanning (single-call)...")
+                return await loop.run_in_executor(ex, gen_direct, current_prompt)
+
+            punkd_profile = "balanced" if gen_choice == "1" else "conservative"
+            print("Scanning with chunked generation...")
+            def run_chunked():
+                return chunked_generate(
+                    llm=llm,
+                    prompt=current_prompt,
+                    max_total_tokens=96,
+                    chunk_tokens=32,
+                    base_temperature=0.15,
+                    punkd_profile=punkd_profile,
+                    streaming_callback=None,
+                )
+            return await loop.run_in_executor(ex, run_chunked)
+
+        try:
+            result = await run_scan(prompt)
+            risk, theft_type = parse_theft_result(result)
+
+            print("\n--- Theft Scanner Result ---\n")
+            rendered = f"{risk} | {theft_type}"
+            if risk == "Low":
+                print(color(rendered, fg=32, bold=True))
+            elif risk == "Medium":
+                print(color(rendered, fg=33, bold=True))
+            else:
+                print(color(rendered, fg=31, bold=True))
+
+            print("\nOptions: 1) Re-run with edits  2) Export to JSON  3) Save & return  4) Cancel")
+            ch = input("Choose (1-4): ").strip()
+
+            if ch == "1":
+                print("Re-run: press Enter to keep the current value.")
+                for key in list(data.keys()):
+                    value = input(f"{key} [{data[key]}]: ").strip()
+                    if value:
+                        data[key] = value
+
+                prompt = build_theft_scanner_prompt(data, include_system_entropy=True)
+                result = await run_scan(prompt)
+                risk, theft_type = parse_theft_result(result)
+                rendered = f"{risk} | {theft_type}"
+                print("\n" + rendered)
+
+            if ch in ("2", "3"):
+                try:
+                    await init_db(state["key"])
+                    await log_interaction(
+                        "THEFT_SCANNER_PROMPT:\n" + prompt,
+                        "THEFT_SCANNER_RESULT:\n" + rendered,
+                        state["key"],
+                    )
+                except Exception as e:
+                    print(f"Failed to log: {e}")
+
+            if ch == "2":
+                outp = {
+                    "input": data,
+                    "prompt": prompt,
+                    "risk": risk,
+                    "theft_type": theft_type,
+                    "result": rendered,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                fn = input("Filename to save JSON (default theft_scan.json): ").strip() or "theft_scan.json"
+                Path(fn).write_text(json.dumps(outp, indent=2), encoding="utf-8")
+                print(f"Saved {fn}")
+        finally:
+            try:
+                del llm
+            except Exception:
+                pass
+            print("Re-encrypting model and removing plaintext...")
+            try:
+                encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state["key"])
+                MODEL_PATH.unlink()
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+            input("Enter to return...")
 
 async def db_viewer_flow(state:dict):
     if not DB_PATH.exists(): print("No DB found."); input("Enter..."); return
@@ -892,14 +1003,14 @@ def safe_cleanup(paths:List[Path]):
         except Exception: pass
 
 def main_menu_loop(state:dict):
-    options = ["Model Manager","Chat with model","Road Scanner","View chat history","Rekey / Rotate key","Exit"]
+    options = ["Model Manager","Chat with model","Theft Scanner","View chat history","Rekey / Rotate key","Exit"]
     while True:
         clear_screen(); header(state); print()
         print(boxed("Main Menu", [f"{i+1}) {opt}" for i,opt in enumerate(options)]))
         idx = read_menu_choice(len(options)); choice = options[idx]
         if choice == "Model Manager": model_manager(state)
         elif choice == "Chat with model": asyncio.run(chat_session(state))
-        elif choice == "Road Scanner": asyncio.run(road_scanner_flow(state))
+        elif choice == "Theft Scanner": asyncio.run(theft_scanner_flow(state))
         elif choice == "View chat history": asyncio.run(db_viewer_flow(state))
         elif choice == "Rekey / Rotate key": rekey_flow(state)
         elif choice == "Exit": print("Goodbye."); return
@@ -920,4 +1031,3 @@ def main():
 
 if __name__=="__main__":
     main()
-

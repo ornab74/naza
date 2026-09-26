@@ -1,185 +1,222 @@
-# NAZA — recovered native Android / Termux build
-## Install on Android with native Termux
 
+# Naza — Quantum-Enhanced Road Scanner & Secure LLM CLI
+
+![Naza SecureLLM TUI – Quantum-Entropic Road Scanner in Action](https://raw.githubusercontent.com/ornab74/naza/refs/heads/main/demonaza.png)
+
+## Android OS Installation and Usage
+
+1. Install Termux from the Play Store 
+   https://play.google.com/store/apps/details?id=com.termux
+   
+2. Download and Run the Setup script by copying the one line command below into Termux and pressing enter.
+   
 ```
-pkg update -y && pkg upgrade -y && pkg install -y git python clang make cmake pkg-config openssl libffi && git clone https://github.com/ornab74/naza.git && cd ~/naza && chmod +x install-android-termux.sh repair-android-termux.sh && chmod 755 "$PREFIX/lib/libtermux-exec.so" && ./install-android-termux.sh
-```
-
-For Ubuntu or Debian, use `termux-naza-autosetup/setup_ubuntu.sh`; it is separate from the native Android/Termux installer.
-
-The canonical Android path is now **native Termux**:
-
-```text
-naza-termux-boot.sh
-        ↓
-naza_unlock.sh
-        ↓
-Android Keystore Gate 3
-        ↓
-run_naza.sh
-        ↓
-naza_crypto_preflight.py
-        ↓
-main.py
-```
-The security menu offers `R` for a confirmed, fail-closed repair/reinstall after Android, Ubuntu, Linux, kernel, or package updates. Repair preserves encrypted state and never automatically rekeys it.
-
-
-There is no normal proot hop in this path.
-
-
-## Recovered application core
-
-The repository keeps the supplied recovery implementation, including:
-
-- `main.py` — unified NAZA TUI, model handling, encrypted history, scanners
-- `spooky_combiner.py` — ML-KEM + HQC combiner
-- `spooky_trihybrid.py` — ML-KEM + HQC + X25519 NKEY4 envelope
-- `naza_storage.py` — hardened atomic storage/rotation helpers
-- `naza_crypto_preflight.py` — startup cryptographic/runtime checks
-- `tests/` — recovered security and regression tests
-
-Recovery provenance and core hashes are recorded in
-[`RECOVERY_PROVENANCE.md`](RECOVERY_PROVENANCE.md).
-
-## Exact GGUF model pin
-
-The recovered `main.py` selects:
-
-```text
-llama3-small-Q3_K_M.gguf
+curl -fsSL https://raw.githubusercontent.com/ornab74/termux-naza-autosetup/main/setup.sh -o setup.sh && if echo "0fd04d0c35d29e9d7420fbcb6250a0bedb6368e7d27c118b24dafca646d829d3  setup.sh" | sha256sum -c - >/dev/null 2>&1; then echo -e "\nHash verified! Running Naza auto-setup...\n" && bash setup.sh && rm -f setup.sh; else echo -e "\nHASH VERIFICATION FAILED!\nThe downloaded file has been tampered with or is corrupted.\nAborting for your safety.\n" && rm -f setup.sh && exit 1; fi
 ```
 
-from:
+3. After the installation completes. Type exit then enter twice or force quit termux
+   
+4. Open Termux
 
-```text
-https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/
+5. After Naza boots up, press 1.
+   
+6. Press enter for each prompt to DL, encrypt, delete plaintext LLM GGUF
+    
+7. Press option 6
+    
+8. Press option 3 , Enter your route location and press enter with blank boxes for the rest
+    
+9. Press enter for default chunked +, punkd generation
+    
+10. View your risk score low/medium/high
+    
+11. If the scan shows high... consider the risks and think about pausing your trip. Or cange up your route on google maps, check the weather and your vehicle for issues. Then rerun after 5 or 10 minutes
+
+## About
+Naza is a secure, encrypted CLI system for AI-assisted road risk assessment, integrating LLaMA models, system-aware entropic scoring, and optional PennyLane quantum-inspired processing.
+
+This system also logs encrypted chat history and allows modular extension for other intelligence tasks, e.g., food & water supply analysis (main_foodwater.py).
+
+---
+
+## Features
+
+1. **Road Scanner (main.py)**  
+   - Inputs: Location, road type, weather, traffic, obstacles, sensor notes  
+   - Outputs: Single-word risk label: Low | Medium | High  
+   - Chunked text generation + PUNKD token-weight adjustments  
+   - Quantum-inspired entropic system scoring to bias predictions  
+
+2. **LLM Chat & Model Manager**  
+   - Interactive AI chat with encrypted LLaMA models  
+   - Download, verify, encrypt/decrypt models (.aes)  
+   - Encrypted SQLite database for history  
+
+3. **System Metrics & Entropic Scoring**  
+   - Metrics: CPU, memory, 1-min load, processes, temperature  
+   - Optional PennyLane quantum evaluation  
+
+4. **Security**  
+   - AES-256 encryption for models and database  
+   - Key rotation (random or passphrase-derived)  
+   - Encrypted logs prevent plaintext leakage  
+
+---
+
+## System Overview & Equations
+
+### 1. System Metrics Collection
+
+Normalized system metrics:  
+
+$$
+\text{cpu} = \frac{\text{cpu\_usage}}{100},\quad
+\text{mem} = \frac{\text{mem\_used}}{\text{mem\_total}},\quad
+\text{load1} = \frac{\text{load\_avg}_1}{N_\text{cpu}},\quad
+\text{proc} = \frac{N_\text{processes}}{1000},\quad
+\text{temp} = \frac{T - 20}{70} \in [0,1]
+$$
+
+Where $N_\text{cpu}$ is the number of cores and 1000 is a normalization factor for process counts.
+
+### 2. Metrics → RGB Mapping
+
+Transforms system metrics into pseudo-color vector for quantum-inspired scoring:  
+
+$$
+\begin{align}
+r &= \frac{\text{cpu} \cdot (1 + \text{load1})}{\max(1.0, \text{max}(r,g,b))} \\
+g &= \frac{\text{mem} \cdot (1 + \text{proc})}{\max(1.0, \text{max}(r,g,b))} \\
+b &= \frac{\text{temp} \cdot (0.5 + 0.5 \cdot \text{cpu})}{\max(1.0, \text{max}(r,g,b))}
+\end{align}
+$$
+
+### 3. PennyLane Entropic Score
+
+For RGB vector, the QNode circuit generates expectation values:  
+
+$$
+\text{circuit}(\theta) = \text{expval}(\sigma_z^{(0)}), \text{expval}(\sigma_z^{(1)})
+$$
+
+Combined into a scalar entropic score:  
+
+$$
+S_\text{entropy} = \frac{1}{1 + e^{-6\left[0.6\frac{\text{ev0}+1}{2} + 0.4\frac{\text{ev1}+1}{2} - 0.5\right]}}
+$$
+
+If PennyLane is unavailable, a pseudo-random approximation is used:  
+
+$$
+S_\text{entropy} \approx 0.3 r + 0.4 g + 0.3 b + \epsilon
+$$
+
+$\epsilon$ is small noise to simulate uncertainty.
+
+### 4. PUNKD Token-Weight Adjustment
+
+Tokens in the prompt are analyzed for hazard relevance:  
+
+$$
+w_t = c_t \cdot b_t
+$$
+
+- $c_t$ = frequency of token  
+- $b_t$ = hazard boost ($b_t = 1$ default, $>1$ for risky tokens like ice, flood)  
+
+Prompt temperature multiplier:  
+
+$$
+T_\text{eff} = T_\text{base} \cdot \left[1 + ( \bar{w} - 0.5 ) \cdot 0.8 \cdot \text{profile\_factor} \right]
+$$
+
+Where $\bar{w}$ = mean token weight, profile_factor adjusts aggressiveness.
+
+### 5. Road Scanner Prompt Logic
+
+1. Normalize input features  
+2. Adjust risk confidence by system entropy  
+3. Apply PUNKD attention to hazard tokens  
+4. Chunked generation ensures safe iterative output  
+5. Select one-word label:  
+
+$$
+\text{Risk} \in \{ \text{Low}, \text{Medium}, \text{High} \}
+$$
+
+### 6. AES Encryption
+
+Encrypted models and database use AES-GCM 256-bit:  
+
+$$
+\text{ciphertext} = \text{AESGCM}_{k}(\text{nonce}, \text{plaintext})
+$$
+
+Key derivation from passphrase (optional) uses PBKDF2-HMAC-SHA256:  
+
+$$
+k = \text{PBKDF2HMAC}(\text{passphrase}, \text{salt}, 200{,}000 \text{ iterations})
+$$
+
+---
+
+## Installation (Termux + Proot Ubuntu)
+
+```
+pkg update -y && pkg upgrade -y
+pkg install -y proot-distro git python clang libcrypt-dev cmake sudo
+
+proot-distro install ubuntu-22.04
+proot-distro login ubuntu-22.04
+
+apt install -y python3-venv build-essential libssl-dev cmake
+python3 -m venv ~/naza_env
+source ~/naza_env/bin/activate
+
+git clone https://gitlab.com/barkzero1/naza.git
+cd naza
+pip install --upgrade pip
+pip install httpx aiosqlite cryptography llama-cpp-python psutil pennylane numpy
 ```
 
-with SHA-256:
+Create sudo user:  
 
-```text
-8e4f4856fb84bafb895f1eb08e6c03e4be613ead2d942f91561aeac742a619aa
+```
+adduser <username>
+usermod -aG sudo <username>
 ```
 
-Model verification is fail-closed before promotion/loading. The GGUF itself is
-runtime data and is deliberately excluded from Git/release archives.
+---
 
-## Cryptographic profile
+## Usage
 
-New recovered envelopes default to the experimental tri-hybrid profile:
+### 1. Road Scanner
 
-```text
-NKEY4
-ML-KEM-1024 + HQC-256 + X25519
-HKDF-SHA512
-AES-256-GCM
+```
+python main.py
 ```
 
-New NKEY4 v2 envelopes use independent Argon2id lanes for the gate material and
-device fingerprint, then combine them with domain-separated HKDF-SHA512. The
-machine-only Android mode derives both separated lanes from hardware identity;
-passphrase and Android Keystore modes add their gate secret to the first lane.
-Existing NKEY4 v1 envelopes remain readable for migration.
+- Input scene and sensor data  
+- Choose generation: chunked + PUNKD (recommended), chunked, or direct  
+- Receive Low | Medium | High label  
+- Optionally export JSON and log encrypted history  
 
-The native installer builds/verifies the pinned liboqs backend and checks that
-`ML-KEM-1024` and `HQC-256` are available before declaring the installation
-healthy.
+### 2. Chat / Model Management
 
-The cryptographic construction is experimental software. Do not treat its
-existence as a substitute for independent review of the protocol or
-implementation.
+- Interactive chat  
+- Download / encrypt / decrypt models  
+- Rotate AES keys  
 
-## Gate 3
+### 3. System & Quantum Scoring
 
-Gate 3 uses an Android Keystore RSA-2048 key named `naza-unlock`. The installer
-requires the key to be hardware-backed and Android-user-authentication gated.
+- Automatically collects CPU, memory, load, temp, process count  
+- Converts metrics → RGB → entropic score → bias to model confidence  
 
-The unlock helper creates a random 32-byte challenge once and stores it in
-`$HOME/.naza/challenge` with owner-only permissions. The challenge is retained:
-with deterministic RSA PKCS#1 v1.5 signing this yields a repeatable derived
-64-hex gate secret, which is required for reopening data already wrapped with
-that gate. The Keystore private key itself never leaves Android Keystore.
-NAZA intentionally binds key wrapping to machine and kernel characteristics. If an OS, kernel, VM, or physical-device change alters that fingerprint, unlock fails closed and recommends the security menu’s `R` repair option. Repair validates/reinstalls the runtime but does not bypass the fingerprint or replace the encryption key. Keep recoverable backups before system upgrades.
+---
 
+## Advanced Notes
 
-Do **not** delete `$HOME/.naza/challenge` after you have used Gate 3 to wrap a
-key unless you have first rewrapped/rotated that data key to another gate.
-
-## Native installer stack
-
-
-`install-android-termux.sh` is the public entry point. It deploys the tree safely, then calls `repair-android-termux.sh`, which reconciles:
-
-- Termux build/runtime packages
-- `venv-termux`
-- liboqs 0.14.0
-- liboqs-python 0.12.0
-- ML-KEM-1024 / HQC-256 verification
-- llama-cpp-python 0.3.1 plus recovered Android loader patch
-- cryptography 46.0.7
-- X25519 / AES-256-GCM verification
-- Android Keystore Gate 3 setup
-- Python and shell syntax validation
-- cryptographic startup preflight
-
-The exact recovered pins are retained in the installer and requirement files.
-
-GitHub Actions also builds an exact CI-only algorithm set: ML-KEM-1024 and HQC-256 for real KEM round trips, plus Dilithium2 solely to sign the canonical lock manifest. The manifest binds the commit, pinned liboqs sources, generated requirements SHA-256, exact KEM policy, and successful round trips. GitHub provenance attests the uploaded `pq-locked-requirements` artifact; KEMs test functionality, while the PQ signature and provenance authenticate the SHA-256-bound manifest.
-
-
-## Verification
-
-Before committing or releasing:
-
-```bash
-./tools/verify-tree.sh
-```
-
-The recovered test suite currently contains 50 tests. The real-liboqs test is
-skipped on hosts where liboqs is not installed; the installer performs real
-liboqs verification on Android.
-
-## Build a clean release ZIP
-
-```bash
-./tools/make-release.sh naza-android-recovered-v3
-```
-
-The release builder excludes models, venvs, caches, logs, local secrets and
-runtime state, regenerates `SHA256SUMS` inside the payload, normalizes archive
-timestamps, and prints the final ZIP SHA-256.
-
-## Replace the existing GitHub repository
-
-This archive is intended to replace the old working tree rather than merge all
-of its stale files. Follow [`REPLACE_REPO.md`](REPLACE_REPO.md) to preserve only
-`.git`, copy this recovered tree over it, stage deletions with `git add -A`, and
-commit the replacement as one reviewable change.
-
-## Repository layout
-
-```text
-install-android-termux.sh        native Android/Termux install entry point
-repair-android-termux.sh         native Android/Termux repair engine
-termux-naza-autosetup/setup_ubuntu.sh   separate Ubuntu/Debian installer
-install_liboqs_0.14.0.sh          pinned liboqs builder
-naza-termux-boot.sh               Gate-3 boot menu
-naza_unlock.sh                    Android Keystore authorization helper
-run_naza.sh                       hardened runtime + preflight launcher
-main.py                           recovered NAZA application
-spooky_combiner.py                dual-PQ combiner
-spooky_trihybrid.py               NKEY4 tri-hybrid wrapper
-naza_storage.py                   hardened storage helpers
-naza_crypto_preflight.py          runtime crypto checks
-tests/                            recovered regression/security suite
-tools/                            verify/release helpers
-```
-
-## Risk-scanner warning
-
-NAZA's road and food/water scanner output is experimental decision-support
-software. A `Low`, `Medium`, or `High` label is not proof that a road, vehicle,
-food item, water source, device, or environment is safe or unsafe. Use direct
-observation, trusted measurements/tests, advisories, and professional/emergency
-guidance where appropriate.
+- Model plaintext never persists; automatically re-encrypted after use  
+- Chunked generation mitigates hallucinations and enforces PUNKD attention  
+- Quantum-inspired entropic score provides a real-time system-aware signal  
+- AES-GCM encryption ensures authenticated confidentiality  
