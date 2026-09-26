@@ -158,34 +158,116 @@ def ensure_key_interactive() -> bytes:
         print(f"Saved random key to {KEY_PATH}")
         return key
 
-def download_model_httpx(url: str, dest: Path, show_progress=True, timeout=None, expected_sha: Optional[str]=None):
+def verify_model_hash(path: Path, expected_sha: str = EXPECTED_HASH, *, remove_on_failure: bool = False) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Model file not found: {path}")
+
+    actual = sha256_file(path)
+    expected = (expected_sha or "").strip().lower()
+
+    if expected and actual.lower() != expected:
+        if remove_on_failure:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise ValueError(
+            "MODEL SHA256 MISMATCH\n"
+            f"Expected: {expected}\n"
+            f"Actual:   {actual}\n"
+            "The model was not accepted."
+        )
+
+    return actual
+
+
+def download_model_httpx(
+    url: str,
+    dest: Path,
+    show_progress: bool = True,
+    timeout=None,
+    expected_sha: Optional[str] = None,
+):
     print(f"⬇️  Downloading model from {url}\nTo: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("Content-Length") or 0)
-        done = 0
-        h = hashlib.sha256()
-        with dest.open("wb") as f:
-            for chunk in r.iter_bytes(chunk_size=8192):
-                if not chunk: break
-                f.write(chunk)
-                h.update(chunk)
-                done += len(chunk)
-                if total and show_progress:
-                    pct = done / total * 100
-                    bar = int(pct // 2)
-                    sys.stdout.write(f"\r[{('#'*bar).ljust(50)}] {pct:5.1f}% ({done//1024}KB/{total//1024}KB)")
-                    sys.stdout.flush()
-    if show_progress: print("\n✅ Download complete.")
-    sha = h.hexdigest()
-    print(f"SHA256: {sha}")
-    if expected_sha:
-        if sha.lower() == expected_sha.lower():
+
+    part = dest.with_name(dest.name + ".part")
+    try:
+        if part.exists():
+            part.unlink()
+    except OSError:
+        pass
+
+    if timeout is None:
+        timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
+
+    done = 0
+    total = 0
+    h = hashlib.sha256()
+
+    try:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as r:
+            r.raise_for_status()
+
+            try:
+                total = int(r.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
+
+            with part.open("wb") as f:
+                for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    h.update(chunk)
+                    done += len(chunk)
+
+                    if show_progress and total > 0:
+                        pct = min(100.0, done / total * 100.0)
+                        bar = int(pct // 2)
+                        sys.stdout.write(
+                            f"\r[{('#' * bar).ljust(50)}] "
+                            f"{pct:5.1f}% ({done // (1024*1024)}MB/{total // (1024*1024)}MB)"
+                        )
+                        sys.stdout.flush()
+
+                f.flush()
+                os.fsync(f.fileno())
+
+        if show_progress:
+            print(
+                "\n✅ Download complete."
+                if total > 0
+                else f"\n✅ Download complete ({done // (1024*1024)} MB)."
+            )
+
+        if done <= 0:
+            raise RuntimeError("Downloaded model is empty.")
+
+        actual_sha = h.hexdigest()
+        print(f"SHA256: {actual_sha}")
+
+        if expected_sha:
+            expected = expected_sha.strip().lower()
+            if actual_sha.lower() != expected:
+                raise ValueError(
+                    "MODEL SHA256 MISMATCH\n"
+                    f"Expected: {expected}\n"
+                    f"Actual:   {actual_sha}\n"
+                    "Downloaded file has been deleted; existing model was left unchanged."
+                )
             print(color("SHA256 matches expected.", fg=32, bold=True))
-        else:
-            print(color(f"SHA256 MISMATCH! expected {expected_sha} got {sha}", fg=31, bold=True))
-    return sha
+
+        os.replace(part, dest)
+        return actual_sha
+
+    except Exception:
+        try:
+            if part.exists():
+                part.unlink()
+        except OSError:
+            pass
+        raise
 
 def encrypt_file(src: Path, dest: Path, key: bytes):
     print(f"🔐 Encrypting {src} -> {dest}")
@@ -654,51 +736,121 @@ def header(status:dict):
 
 def model_manager(state:dict):
     while True:
-        clear_screen(); header(state)
-        lines=["1) Download model from remote repo (httpx)","2) Verify plaintext model hash (compute SHA256)","3) Encrypt plaintext model -> .aes","4) Decrypt .aes -> plaintext (temporary)","5) Delete plaintext model","6) Back"]
+        clear_screen()
+        header(state)
+        lines = [
+            "1) Download + verify model from remote repo",
+            "2) Verify plaintext model SHA256",
+            "3) Verify + encrypt plaintext model -> .aes",
+            "4) Decrypt .aes -> verify plaintext",
+            "5) Delete plaintext model",
+            "6) Back",
+        ]
         print(boxed("Model Manager", lines))
         choice = input("Choose (1-6): ").strip()
-        if choice=="1":
+
+        if choice == "1":
             if MODEL_PATH.exists():
-                if input("Plaintext model exists; overwrite? (y/N): ").strip().lower()!='y': continue
+                print(f"Plaintext model already exists: {MODEL_PATH}")
+                try:
+                    current_sha = verify_model_hash(MODEL_PATH)
+                    print(color(f"Existing model is verified: {current_sha}", fg=32, bold=True))
+                except Exception as e:
+                    print(color(str(e), fg=31, bold=True))
+
+                if input("Download and replace it only if the new file verifies? (y/N): ").strip().lower() != "y":
+                    continue
+
             try:
                 url = MODEL_REPO + MODEL_FILE
-                sha = download_model_httpx(url, MODEL_PATH, show_progress=True, timeout=None, expected_sha=EXPECTED_HASH)
-                print(f"Downloaded to {MODEL_PATH}")
-                print(f"Computed SHA256: {sha}")
-                if input("Encrypt downloaded model with current key now? (Y/n): ").strip().lower()!='n':
-                    encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
+                sha = download_model_httpx(
+                    url,
+                    MODEL_PATH,
+                    show_progress=True,
+                    timeout=None,
+                    expected_sha=EXPECTED_HASH,
+                )
+                print(color(f"Verified model installed at {MODEL_PATH}", fg=32, bold=True))
+                print(f"Verified SHA256: {sha}")
+
+                if input("Encrypt verified model with current key now? (Y/n): ").strip().lower() != "n":
+                    verify_model_hash(MODEL_PATH)
+                    encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state["key"])
                     print(f"Encrypted -> {ENCRYPTED_MODEL}")
-                    if input("Remove plaintext model? (Y/n): ").strip().lower()!='n':
-                        MODEL_PATH.unlink(); print("Plaintext removed.")
+                    if input("Remove verified plaintext model? (Y/n): ").strip().lower() != "n":
+                        MODEL_PATH.unlink()
+                        print("Plaintext removed.")
+
             except Exception as e:
-                print(f"Download failed: {e}")
+                print(color(f"Download/verification FAILED:\n{e}", fg=31, bold=True))
+                print("No mismatched download was promoted or encrypted.")
+
             input("Enter to continue...")
-        elif choice=="2":
-            if not MODEL_PATH.exists(): print("No plaintext model found.")
-            else: print(f"SHA256: {sha256_file(MODEL_PATH)}")
+
+        elif choice == "2":
+            if not MODEL_PATH.exists():
+                print("No plaintext model found.")
+            else:
+                try:
+                    sha = verify_model_hash(MODEL_PATH)
+                    print(color("MODEL VERIFIED.", fg=32, bold=True))
+                    print(f"SHA256: {sha}")
+                except Exception as e:
+                    print(color(f"VERIFICATION FAILED:\n{e}", fg=31, bold=True))
             input("Enter to continue...")
-        elif choice=="3":
-            if not MODEL_PATH.exists(): print("No plaintext model to encrypt."); input("Enter..."); continue
-            encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state['key'])
-            if input("Remove plaintext? (Y/n): ").strip().lower()!='n':
-                MODEL_PATH.unlink(); print("Removed plaintext.")
+
+        elif choice == "3":
+            if not MODEL_PATH.exists():
+                print("No plaintext model to encrypt.")
+                input("Enter...")
+                continue
+            try:
+                sha = verify_model_hash(MODEL_PATH)
+                print(color(f"SHA256 verified: {sha}", fg=32, bold=True))
+                encrypt_file(MODEL_PATH, ENCRYPTED_MODEL, state["key"])
+                if input("Remove plaintext? (Y/n): ").strip().lower() != "n":
+                    MODEL_PATH.unlink()
+                    print("Removed plaintext.")
+            except Exception as e:
+                print(color(f"Refusing to encrypt unverified model:\n{e}", fg=31, bold=True))
             input("Enter...")
-        elif choice=="4":
-            if not ENCRYPTED_MODEL.exists(): print("No .aes model present.")
-            else: decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+
+        elif choice == "4":
+            if not ENCRYPTED_MODEL.exists():
+                print("No .aes model present.")
+            else:
+                try:
+                    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state["key"])
+                    sha = verify_model_hash(MODEL_PATH, remove_on_failure=True)
+                    print(color(f"Decrypted model verified: {sha}", fg=32, bold=True))
+                except Exception as e:
+                    print(color(f"Decrypt/verification FAILED:\n{e}", fg=31, bold=True))
+                    print("Invalid plaintext was removed.")
             input("Enter...")
-        elif choice=="5":
+
+        elif choice == "5":
             if MODEL_PATH.exists():
-                if input(f"Delete {MODEL_PATH}? (y/N): ").strip().lower()=="y": MODEL_PATH.unlink(); print("Deleted.")
-            else: print("No plaintext model.")
+                if input(f"Delete {MODEL_PATH}? (y/N): ").strip().lower() == "y":
+                    MODEL_PATH.unlink()
+                    print("Deleted.")
+            else:
+                print("No plaintext model.")
             input("Enter...")
-        elif choice=="6": return
-        else: print("Invalid.")
+
+        elif choice == "6":
+            return
+        else:
+            print("Invalid.")
 
 async def chat_session(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found. Please download & encrypt first."); input("Enter..."); return
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    try:
+        decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+        verify_model_hash(MODEL_PATH, remove_on_failure=True)
+    except Exception as e:
+        print(color(f"Model integrity check failed:\n{e}", fg=31, bold=True))
+        input("Enter...")
+        return
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
@@ -757,7 +909,13 @@ async def road_scanner_flow(state:dict):
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+    try:
+        decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
+        verify_model_hash(MODEL_PATH, remove_on_failure=True)
+    except Exception as e:
+        print(color(f"Model integrity check failed:\n{e}", fg=31, bold=True))
+        input("Enter...")
+        return
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as ex:
         try:
