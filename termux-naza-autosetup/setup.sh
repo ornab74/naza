@@ -5,7 +5,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 REPO_URL="https://github.com/ornab74/naza.git"
-NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e"
+NAZA_REF="05de6b1ff546a92347cd3cbd7775f8ea28b36847"
 DISTRO_ALIAS="ubuntu"
 DISTRO_IMAGE="ubuntu:24.04"
 NAZA_USER="sudouser"
@@ -74,7 +74,7 @@ say "Cloning/updating NAZA as ${NAZA_USER} at pinned commit ${NAZA_REF}"
 proot-distro login --user "$NAZA_USER" "$DISTRO_ALIAS" -- /bin/bash -lc '
 set -Eeuo pipefail
 REPO_URL="https://github.com/ornab74/naza.git"
-NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e"
+NAZA_REF="05de6b1ff546a92347cd3cbd7775f8ea28b36847"
 APP="$HOME/naza"
 
 if [ -d "$APP/.git" ]; then
@@ -109,7 +109,7 @@ proot-distro login --user "$NAZA_USER" "$DISTRO_ALIAS" -- /bin/bash -lc '
 set -Eeuo pipefail
 cd "$HOME/naza"
 chmod +x termux-naza-autosetup/setup_ubuntu.sh
-NAZA_APP_DIR="$HOME/naza" NAZA_REPO_URL="https://github.com/ornab74/naza.git" NAZA_REF="aa3f3056c883223734af0aff311757dc91f5233e" \
+NAZA_APP_DIR="$HOME/naza" NAZA_REPO_URL="https://github.com/ornab74/naza.git" NAZA_REF="05de6b1ff546a92347cd3cbd7775f8ea28b36847" \
     bash termux-naza-autosetup/setup_ubuntu.sh
 '
 
@@ -125,16 +125,75 @@ USER_NAME="sudouser"
 
 export TERM="${TERM:-xterm-256color}"
 
-printf '\n'
-printf '╔══════════════════════════════════════════════════════════╗\n'
-printf '║                 Starting NAZA TUI                       ║\n'
-printf '║        Termux → Ubuntu proot → sudouser → NAZA         ║\n'
-printf '╚══════════════════════════════════════════════════════════╝\n'
-printf '\n'
+clear 2>/dev/null || true
+printf '
+'
+printf '╔══════════════════════════════════════════════════════════╗
+'
+printf '║                    NAZA BOOT MENU                       ║
+'
+printf '║        Termux → Ubuntu proot → sudouser → NAZA         ║
+'
+printf '╚══════════════════════════════════════════════════════════╝
+'
+printf '
+'
+printf '  1) Road Scanner        - main.py
+'
+printf '  2) Food / Water        - main_foodwater.py
+'
+printf '  3) Theft Scanner       - maintheft.py
+'
+printf '  q) Return to Termux
+'
+printf '
+'
+
+while true; do
+    printf 'Select NAZA mode [1-3, q]: '
+    IFS= read -r choice
+
+    case "$choice" in
+        1)
+            TARGET_SCRIPT="main.py"
+            TARGET_LABEL="Road Scanner"
+            break
+            ;;
+        2)
+            TARGET_SCRIPT="main_foodwater.py"
+            TARGET_LABEL="Food / Water Scanner"
+            break
+            ;;
+        3)
+            TARGET_SCRIPT="maintheft.py"
+            TARGET_LABEL="Theft Scanner"
+            break
+            ;;
+        q|Q|exit|quit)
+            printf 'Returning to Termux.
+'
+            exit 0
+            ;;
+        *)
+            printf 'Invalid selection. Choose 1, 2, 3, or q.
+'
+            ;;
+    esac
+done
+
+printf '
+Starting %s (%s)...
+
+' "$TARGET_LABEL" "$TARGET_SCRIPT"
 
 # Keep stdin/stdout/stderr attached to the current interactive Termux terminal.
-exec proot-distro login --user "$USER_NAME" "$DISTRO" -- /bin/bash -lc '
+exec proot-distro login --user "$USER_NAME" "$DISTRO" -- \
+    /bin/bash -lc '
 set -Eeuo pipefail
+
+TARGET_SCRIPT="$1"
+TARGET_LABEL="$2"
+
 cd "$HOME/naza"
 
 export TERM="${TERM:-xterm-256color}"
@@ -145,21 +204,30 @@ export OQS_INSTALL_PATH="$HOME/.local/liboqs-0.14.0"
 export LD_LIBRARY_PATH="$OQS_INSTALL_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export NAZA_CRYPTO_MODE=tri
 
-# Ubuntu uses venv/, not the native-Termux venv-termux/.
 if [ ! -x "$HOME/naza/venv/bin/python" ]; then
     echo "ERROR: Ubuntu NAZA venv is missing: $HOME/naza/venv" >&2
     echo "Re-run the installer/repair script." >&2
     exit 1
 fi
 
-# The repository run_naza.sh is the native Termux launcher and contains
-# Termux-specific paths. Inside Ubuntu, execute the Ubuntu venv directly.
+if [ ! -f "$HOME/naza/$TARGET_SCRIPT" ]; then
+    echo "ERROR: Selected NAZA entry point does not exist:" >&2
+    echo "  $HOME/naza/$TARGET_SCRIPT" >&2
+    echo >&2
+    echo "Pinned repository version may not contain this scanner." >&2
+    exit 1
+fi
+
 if [ -f "$HOME/naza/naza_crypto_preflight.py" ]; then
     "$HOME/naza/venv/bin/python" "$HOME/naza/naza_crypto_preflight.py"
 fi
 
-exec "$HOME/naza/venv/bin/python" -u "$HOME/naza/main.py"
-'
+printf "
+Launching %s...
+
+" "$TARGET_LABEL"
+exec "$HOME/naza/venv/bin/python" -u "$HOME/naza/$TARGET_SCRIPT"
+' bash "$TARGET_SCRIPT" "$TARGET_LABEL"
 LAUNCHER
 chmod 0755 "$TERMUX_LAUNCHER"
 
@@ -222,7 +290,12 @@ Open Termux WITHOUT autostarting NAZA:
   NAZA_NO_AUTOSTART=1 bash
 
 Pinned NAZA commit:
-  aa3f3056c883223734af0aff311757dc91f5233e
+  05de6b1ff546a92347cd3cbd7775f8ea28b36847
+
+Boot menu:
+  1 -> main.py
+  2 -> main_foodwater.py
+  3 -> maintheft.py
 
 Expected path:
   Termux
