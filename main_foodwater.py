@@ -712,12 +712,12 @@ f"Analyze the environmental and triple check cor accurate intelligent replu and 
 f"Your reply must be only one word: Low, Medium, or High.\n\n"
 f"[tuning]\n"
 f"Scene details:\n"
-f"Location: {data.get('location','unspecified location')}\n"
-f"Food or Water Type: {data.get('road_type','unknown')}\n"
-f"Condition: {data.get('weather','unknown')}\n"
-f"Temp: {data.get('traffic','unknown')}\n"
-f"Cooked, Frozen Or Uncooked: {data.get('obstacles','none')}\n"
-f"Sensor notes: {data.get('sensor_notes','none')}\n"
+f"Location: {data.get('location','')}\n"
+f"Food or Water Type: {data.get('road_type','')}\n"
+f"Condition: {data.get('weather','')}\n"
+f"Temp: {data.get('traffic','')}\n"
+f"Cooked, Frozen Or Uncooked: {data.get('obstacles','')}\n"
+f"Sensor notes: {data.get('sensor_notes','')}\n"
 f"{metrics_line}\n"
 f"Quantum data: {entropy_text}\n"
 f"[/tuning]\n\n"
@@ -909,13 +909,13 @@ async def road_scanner_flow(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
     data={}
     clear_screen(); header(state)
-    print(boxed("Food / Water Scanner - Step 1/6", ["Leave blank for defaults"]))
-    data['location'] = input("Location (e.g., whole foods'): ").strip() or "unspecified location"
-    data['road_type'] = input("food or water type: ").strip() or "highway"
-    data['weather'] = input("Condition ").strip() or "clear"
-    data['traffic'] = input("Temperture ").strip() or "low"
-    data['obstacles'] = input("Cooked Frozen Or uncooked ").strip() or "none"
-    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
+    print(boxed("Food / Water Scanner - Step 1/6", ["Blank fields stay blank"]))
+    data['location'] = input("Location (e.g., whole foods'): ").strip()
+    data['road_type'] = input("food or water type: ").strip()
+    data['weather'] = input("Condition ").strip()
+    data['traffic'] = input("Temperture ").strip()
+    data['obstacles'] = input("Cooked Frozen Or uncooked ").strip()
+    data['sensor_notes'] = input("Sensor notes: ").strip()
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)

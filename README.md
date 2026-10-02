@@ -61,6 +61,15 @@ This system also logs encrypted chat history and allows modular extension for ot
    - Key rotation (random or passphrase-derived)  
    - Encrypted logs prevent plaintext leakage  
 
+5. **30-Circuit Clef / RAG Quantum Ensemble**
+   - 30 competing circuit profiles, each using 8-14 qubits
+   - Five-candidate RAG shortlist followed by stochastic softmax sampling at `T=0.55`
+   - Routing score: `0.45*RAG + 0.30*history + 0.15*novelty + 0.10*entropy_quality`
+   - Dynamic normalized measurement-entropy bands: 72-82% for realism/stereotype, 78-88% for beauty/emotion, and 84-92% for epic/awe/creative tasks
+   - Clef reward update: `H_new = 0.8*H_old + 0.2*(Clef/100)`
+   - Only the selected circuit executes, so the 30-profile ensemble does not require simulating all 30 circuits per prompt
+   - Retrieval memory stores hashed semantic feature vectors and scores rather than raw prompt text
+
 ---
 
 ## System Overview & Equations
@@ -211,6 +220,25 @@ python main.py
 
 - Automatically collects CPU, memory, load, temp, process count  
 - Converts metrics → RGB → entropic score → bias to model confidence  
+- Routes chat and road-scanner prompts through the 30-circuit ensemble before generation
+- In chat, use `/quantum` to inspect learned circuit history
+- After an external/real Clef evaluation, use `/clef 94.3` (replace `94.3` with the actual score) to update the last routed attempt
+
+### 4. Ensemble API
+
+```python
+from quantum_ensemble import choose_circuit, record_clef_result
+
+route = choose_circuit(
+    "stereotypical Arch Linux nerd",
+    category="stereotype",
+)
+
+# Attach the real Clef result when it becomes available.
+record_clef_result(94.3, attempt_id=route["attempt_id"])
+```
+
+The selector first retrieves the five closest circuit profiles, then samples inside that shortlist. The persisted feedback state is written to `clef_quantum_history.json`, which is excluded from git.
 
 ---
 
