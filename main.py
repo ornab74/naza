@@ -18,19 +18,6 @@ except Exception:
     qml = None
     pnp = None
 
-try:
-    from quantum_ensemble import (
-        choose_circuit as choose_quantum_circuit,
-        ensemble_status as quantum_ensemble_status,
-        record_clef_result,
-        routing_prompt_context,
-    )
-except Exception:
-    choose_quantum_circuit = None
-    quantum_ensemble_status = None
-    record_clef_result = None
-    routing_prompt_context = None
-
 MODEL_REPO = "https://huggingface.co/tensorblock/llama3-small-GGUF/resolve/main/"
 MODEL_FILE = "llama3-small-Q3_K_M.gguf"
 MODELS_DIR = Path("models")
@@ -639,35 +626,6 @@ def entropic_summary_text(score: float) -> str:
 def _simple_tokenize(text: str) -> List[str]:
     return [t for t in re.findall(r"[A-Za-z0-9_\-]+", text.lower())]
 
-def infer_quantum_category(prompt_text: str) -> str:
-    """Coarse local task category for the 30-circuit router."""
-    text = (prompt_text or "").lower()
-    rules = (
-        ("stereotype", ("stereotype", "stereotypical", "archetype")),
-        ("realism", ("realistic", "realism", "photoreal", "photo")),
-        ("beauty", ("beautiful", "beauty", "aesthetic", "elegant")),
-        ("emotion", ("emotion", "emotional", "feeling", "mood")),
-        ("epic", ("epic", "awe", "cinematic", "monumental")),
-        ("character", ("character", "portrait", "person", "face")),
-        ("composition", ("composition", "layout", "framing", "scene")),
-        ("abstract", ("abstract", "surreal", "conceptual", "symbolic")),
-    )
-    for category, words in rules:
-        if any(word in text for word in words):
-            return category
-    return "chat"
-
-def apply_quantum_routing(prompt_text: str, category: Optional[str] = None):
-    """Return (augmented_prompt, route). Fail open when the ensemble is unavailable."""
-    if choose_quantum_circuit is None or routing_prompt_context is None:
-        return prompt_text, None
-    try:
-        cat = category or infer_quantum_category(prompt_text)
-        route = choose_quantum_circuit(prompt_text, cat)
-        return routing_prompt_context(route) + "\n\n" + prompt_text, route
-    except Exception:
-        return prompt_text, None
-
 def punkd_analyze(prompt_text: str, top_n: int = 12) -> Dict[str,float]:
     toks = _simple_tokenize(prompt_text)
     freq={}
@@ -906,8 +864,7 @@ async def chat_session(state:dict):
         state['model_loaded']=True
         try:
             await init_db(state['key'])
-            print("Type /exit to return, /history for messages, /clef <0-100> to score the last routed answer, /quantum for ensemble status.")
-            last_route = None
+            print("Type /exit to return, /history to show last 10 messages.")
             while True:
                 prompt = input("\nYou> ").strip()
                 if not prompt: continue
@@ -916,38 +873,6 @@ async def chat_session(state:dict):
                     rows = await fetch_history(state['key'], limit=10)
                     for r in rows: print(f"[{r[0]}] {r[1]}\nQ: {r[2]}\nA: {r[3]}\n{'-'*30}")
                     continue
-                if prompt.startswith("/clef"):
-                    if record_clef_result is None:
-                        print("Quantum ensemble feedback is unavailable.")
-                        continue
-                    parts = prompt.split(maxsplit=1)
-                    if len(parts) != 2:
-                        print("Usage: /clef <0-100>")
-                        continue
-                    try:
-                        score = float(parts[1])
-                        attempt_id = last_route.get("attempt_id") if last_route else None
-                        update = record_clef_result(score, attempt_id=attempt_id)
-                        print(f"Clef feedback: {update['circuit_id']} {update['historical_before']:.3f} -> {update['historical_after']:.3f}")
-                    except Exception as e:
-                        print(f"Clef feedback rejected: {e}")
-                    continue
-                if prompt == "/quantum":
-                    if quantum_ensemble_status is None:
-                        print("Quantum ensemble is unavailable.")
-                    else:
-                        try:
-                            rows = quantum_ensemble_status(limit=8)
-                            print("Top circuit history:")
-                            for row in rows:
-                                print(f"  {row['id']} q={row['qubits']} bias={row['bias']:<20} H={row['historical_score']:.3f} entropy={row['mean_entropy']:.3f} runs={row['runs']} clef={row['clef_updates']}")
-                        except Exception as e:
-                            print(f"Unable to read ensemble status: {e}")
-                    continue
-                routed_prompt, last_route = apply_quantum_routing(prompt)
-                if last_route:
-                    c = last_route['circuit']
-                    print(f"⚛ {c['id']} / {c['qubits']}q / {c['bias']} / p={last_route['probability']:.3f} / Hm={last_route['entropy']:.3f}")
                 def gen(p):
                     out = llm(p, max_tokens=256, temperature=0.7)
                     text = ""
@@ -959,7 +884,7 @@ async def chat_session(state:dict):
                     text = text.replace("You are a helpful AI assistant named SmolLM, trained by Hugging Face","").strip()
                     return text
                 print("🤖 Thinking...")
-                result = await loop.run_in_executor(ex, gen, routed_prompt)
+                result = await loop.run_in_executor(ex, gen, prompt)
                 print("\nModel:\n"+result+"\n")
                 await log_interaction(prompt, result, state['key'])
         finally:
@@ -974,22 +899,16 @@ async def road_scanner_flow(state:dict):
     if not ENCRYPTED_MODEL.exists(): print("No encrypted model found."); input("Enter..."); return
     data={}
     clear_screen(); header(state)
-    print(boxed("Road Scanner - Step 1/6", ["Blank fields stay blank"]))
-    data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip()
-    data['road_type'] = input("Road type (highway/urban/residential): ").strip()
-    data['weather'] = input("Weather/visibility: ").strip()
-    data['traffic'] = input("Traffic density (low/med/high): ").strip()
-    data['obstacles'] = input("Reported obstacles: ").strip()
-    data['sensor_notes'] = input("Sensor notes: ").strip()
+    print(boxed("Road Scanner - Step 1/6", ["Leave blank for defaults"]))
+    data['location'] = input("Location (e.g., 'I-95 NB mile 12'): ").strip() or "unspecified location"
+    data['road_type'] = input("Road type (highway/urban/residential): ").strip() or "highway"
+    data['weather'] = input("Weather/visibility: ").strip() or "clear"
+    data['traffic'] = input("Traffic density (low/med/high): ").strip() or "low"
+    data['obstacles'] = input("Reported obstacles: ").strip() or "none"
+    data['sensor_notes'] = input("Sensor notes: ").strip() or "none"
     print("\nGeneration options:\n1) Chunked generation + punkd (recommended)\n2) Chunked only\n3) Direct single-call generation")
     gen_choice = input("Choose (1-3) [1]: ").strip() or "1"
     prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-    route_query = " ".join(str(data.get(k, "")) for k in ("location", "road_type", "weather", "traffic", "obstacles", "sensor_notes"))
-    routed_prompt, road_route = apply_quantum_routing(route_query + "\n" + prompt, category="road-risk")
-    prompt = routed_prompt
-    if road_route:
-        c = road_route['circuit']
-        print(f"⚛ Ensemble route: {c['id']} ({c['qubits']}q, {c['bias']}) p={road_route['probability']:.3f}, entropy={road_route['entropy']:.3f}")
     try:
         decrypt_file(ENCRYPTED_MODEL, MODEL_PATH, state['key'])
         verify_model_hash(MODEL_PATH, remove_on_failure=True)
@@ -1045,11 +964,6 @@ async def road_scanner_flow(state:dict):
                 v = input(f"{k} [{data[k]}]: ").strip()
                 if v: data[k]=v
             prompt = build_road_scanner_prompt(data, include_system_entropy=True)
-            route_query = " ".join(str(data.get(k, "")) for k in ("location", "road_type", "weather", "traffic", "obstacles", "sensor_notes"))
-            prompt, road_route = apply_quantum_routing(route_query + "\n" + prompt, category="road-risk")
-            if road_route:
-                c = road_route['circuit']
-                print(f"⚛ Ensemble route: {c['id']} ({c['qubits']}q, {c['bias']}) p={road_route['probability']:.3f}, entropy={road_route['entropy']:.3f}")
             print("Re-scanning...")
             if gen_choice == "3": result = await loop.run_in_executor(ex, gen_direct, prompt)
             else:
