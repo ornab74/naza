@@ -220,3 +220,29 @@ python main.py
 - Chunked generation mitigates hallucinations and enforces PUNKD attention  
 - Quantum-inspired entropic score provides a real-time system-aware signal  
 - AES-GCM encryption ensures authenticated confidentiality  
+
+
+## OpenAI Decisions Road-Risk Model
+
+Naza now includes an optional Decisions API classifier in `naza_decisions.py`. It keeps the existing local LLaMA road scanner intact while adding an auditable remote decision path that returns a `Low`, `Medium`, or `High` choice, confidence, and per-label probabilities.
+
+Requirements:
+
+```bash
+export OPENAI_API_KEY="..."
+pip install -r requirements.txt
+```
+
+Run it directly:
+
+```bash
+python naza_decisions.py
+```
+
+The classifier uses `gpt-6-luna` with a Decisions API `choice` question. Results below the default confidence threshold of `0.65` are marked `review_required=true` rather than silently coerced to another label. Tune that threshold against labeled road-scene examples before relying on it operationally.
+
+Run the local unit tests without making an API call:
+
+```bash
+python -m unittest test_naza_decisions.py
+```
